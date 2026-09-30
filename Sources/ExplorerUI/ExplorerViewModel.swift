@@ -4,6 +4,7 @@ import Foundation
 /// texto a nivel instancia (case-insensitive), toggles Linux/Windows
 /// aplicados a nivel zona. Confinado al hilo principal (AppKit); la UI se
 /// entera por `onChange`. Testeable sin UI (REQ-EXP-4).
+@MainActor
 public final class ExplorerViewModel {
     public var onChange: (() -> Void)?
 
@@ -33,6 +34,31 @@ public final class ExplorerViewModel {
             guard !zones.isEmpty else { return nil }
             return ProjectInfo(name: project.name, zones: zones)
         }
+    }
+
+    public var projectCount: Int { projects.count }
+    public var instanceCount: Int { Self.instanceCount(in: projects) }
+    public var visibleInstanceCount: Int { Self.instanceCount(in: filteredProjects) }
+
+    /// Texto de la status bar: "MOCK — 2 proyectos, 6 instancias (3 visibles)".
+    public func statusSummary(source: String) -> String {
+        var text = "\(source) — \(Self.plural(projectCount, "proyecto", "proyectos")), "
+            + Self.plural(instanceCount, "instancia", "instancias")
+        let visible = visibleInstanceCount
+        if visible != instanceCount {
+            text += " (\(visible) \(visible == 1 ? "visible" : "visibles"))"
+        }
+        return text
+    }
+
+    private static func instanceCount(in projects: [ProjectInfo]) -> Int {
+        projects.reduce(0) { total, project in
+            total + project.zones.reduce(0) { $0 + $1.instances.count }
+        }
+    }
+
+    private static func plural(_ n: Int, _ one: String, _ many: String) -> String {
+        "\(n) \(n == 1 ? one : many)"
     }
 
     private func osAllowed(_ os: GuestOS) -> Bool {

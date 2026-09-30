@@ -13,6 +13,7 @@ private func sample() -> [ProjectInfo] {
 }
 
 @Suite("Explorer filtering")
+@MainActor
 struct ExplorerFilteringTests {
     @Test func textFilterIsCaseInsensitive() {
         let vm = ExplorerViewModel(projects: sample())
