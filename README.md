@@ -11,6 +11,8 @@ Estado: **M0 (Fundación)** — specs Auth/Explorer/Tunnel + esqueleto SPM + CI.
 
 - macOS 14+, Xcode 16+, Swift 6 (strict concurrency).
 - `swift build`, `swift test`.
+- Guía completa (CLT vs Xcode, workaround de tests, `.app`, snapshots,
+  troubleshooting): [`docs/usage.md`](docs/usage.md).
 
 ## Metodología
 
