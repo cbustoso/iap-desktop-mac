@@ -25,13 +25,16 @@ let package = Package(
         .target(name: "SFTPKit"),
         .target(name: "RDPBridge"),
         .target(name: "SettingsStore"),
+        .target(name: "ExplorerUI"),
         .executableTarget(name: "App", dependencies: [
             "AuthKit", "GCPClient", "TunnelKit", "SSHKit",
-            "TerminalUI", "SFTPKit", "RDPBridge", "SettingsStore"
+            "TerminalUI", "SFTPKit", "RDPBridge", "SettingsStore",
+            "ExplorerUI",
         ]),
         .testTarget(name: "AuthKitTests", dependencies: ["AuthKit"]),
         .testTarget(name: "TunnelKitTests", dependencies: ["TunnelKit"]),
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
-        .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"])
+        .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
+        .testTarget(name: "ExplorerUITests", dependencies: ["ExplorerUI"]),
     ]
 )
