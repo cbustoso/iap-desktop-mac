@@ -95,9 +95,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default: break
         }
         if let id = env["IAP_SNAPSHOT_SELECT"] { windowController?.selectNode(id: id) }
+        // IAP_SNAPSHOT_LOGIN=1 captura la ventana Sign In en vez de la principal.
+        let target: NSWindow? = env["IAP_SNAPSHOT_LOGIN"] == "1"
+            ? { showLoginWindow(nil); return loginWindowController?.window }()
+            : windowController?.window
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
-            if let frame = windowController?.window?.contentView?.superview,
+            if let frame = target?.contentView?.superview,
                let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) {
                 frame.cacheDisplay(in: frame.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?
