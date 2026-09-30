@@ -15,6 +15,9 @@ final class LoginWindowController: NSWindowController {
 
     private let clientIDField = NSTextField()
     private let saveClientIDButton = NSButton(title: "Save", target: nil, action: nil)
+    private let customClientIDButton = NSButton(
+        title: "Use a different OAuth client…", target: nil, action: nil)
+    private var clientIDRow = NSStackView()
     private let signInButton = NSButton(title: "Sign in", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
     private let headerLabel = NSTextField(labelWithString: "IAP Desktop Mac")
@@ -28,9 +31,10 @@ final class LoginWindowController: NSWindowController {
         sessionFactory: @escaping SessionFactory = { LoginSession(window: $0) }
     ) {
         self.facade = facade
-        self.clientIDStore = ClientIDStore(environment: clientID.isEmpty ? [:] : [
-            ClientIDStore.environmentKey: clientID
-        ])
+        // Orden (CBU-36): override en UserDefaults > Info.plist > entorno.
+        var environment = ProcessInfo.processInfo.environment
+        if !clientID.isEmpty { environment[ClientIDStore.environmentKey] = clientID }
+        self.clientIDStore = ClientIDStore(environment: environment)
         self.tokenClientFactory = tokenClientFactory
         self.sessionFactory = sessionFactory
 
@@ -71,7 +75,7 @@ final class LoginWindowController: NSWindowController {
         signInRow.alignment = .centerY
         signInRow.spacing = 8
 
-        let clientIDRow = NSStackView(views: [clientIDField, saveClientIDButton])
+        clientIDRow = NSStackView(views: [clientIDField, saveClientIDButton])
         clientIDRow.orientation = .horizontal
         clientIDRow.spacing = 8
         clientIDField.placeholderString = "OAuth client ID"
@@ -86,6 +90,7 @@ final class LoginWindowController: NSWindowController {
             headerLabel,
             descriptionLabel,
             signInRow,
+            customClientIDButton,
             clientIDRow,
             statusLabel,
         ])
@@ -93,10 +98,31 @@ final class LoginWindowController: NSWindowController {
         stack.alignment = .centerX
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
+        // Una etiqueta de `labelWithString` no hace wrap: sin esto los
+        // mensajes largos (p. ej. el del enlace a Cloud Console) se cortan.
         statusLabel.alignment = .center
-        statusLabel.maximumNumberOfLines = 2
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.maximumNumberOfLines = 3
+        statusLabel.preferredMaxLayoutWidth = 340
+        statusLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        // Necesario para que el enlace a Cloud Console sea clicable.
+        statusLabel.isSelectable = true
+        statusLabel.allowsEditingTextAttributes = true
+
+        customClientIDButton.isBordered = false
+        customClientIDButton.font = .systemFont(ofSize: 11)
+        customClientIDButton.contentTintColor = .linkColor
+        customClientIDButton.target = self
+        customClientIDButton.action = #selector(showCustomClientID(_:))
+
+        // Como el IAP Desktop original: con client ID disponible solo se ve
+        // "Sign in"; el campo queda como opción avanzada.
         if let clientID = try? clientIDStore.resolve() {
             clientIDField.stringValue = clientID
+            clientIDRow.isHidden = true
+        } else {
+            customClientIDButton.isHidden = true
+            showMissingClientIDStatus()
         }
         clientIDField.widthAnchor.constraint(equalToConstant: 250).isActive = true
         saveClientIDButton.bezelStyle = .rounded
@@ -152,13 +178,49 @@ final class LoginWindowController: NSWindowController {
         }
     }
 
+    @objc private func showCustomClientID(_ sender: Any?) {
+        customClientIDButton.isHidden = true
+        clientIDRow.isHidden = false
+        window?.makeFirstResponder(clientIDField)
+    }
+
     @objc private func saveClientID(_ sender: Any?) {
+        // Campo vacío = quitar el override y volver al client ID por defecto.
+        if clientIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            clientIDStore.clearOverride()
+            if let clientID = try? clientIDStore.resolve() {
+                clientIDField.stringValue = clientID
+                statusLabel.stringValue = "Using the default client ID."
+            } else {
+                showMissingClientIDStatus()
+            }
+            return
+        }
         do {
             clientIDField.stringValue = try clientIDStore.save(clientIDField.stringValue)
             statusLabel.stringValue = "Client ID saved."
         } catch {
             statusLabel.stringValue = "Enter a valid Google OAuth client ID."
         }
+    }
+
+    /// Sin client ID: mensaje con enlace a Cloud Console y el campo visible.
+    private func showMissingClientIDStatus() {
+        clientIDRow.isHidden = false
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let base: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraph,
+        ]
+        var link = base
+        link[.link] = ClientIDStore.cloudConsoleCredentialsURL
+        let message = NSMutableAttributedString(
+            string: "No OAuth client ID configured. Create a Desktop app client in ", attributes: base)
+        message.append(NSAttributedString(string: "Google Cloud Console", attributes: link))
+        message.append(NSAttributedString(string: " and paste it above.", attributes: base))
+        statusLabel.attributedStringValue = message
     }
 
     @objc private func beginSignIn(_ sender: Any?) {
@@ -170,17 +232,16 @@ final class LoginWindowController: NSWindowController {
     private func signIn() async {
         let clientID: String
         do {
-            if clientIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                clientID = try clientIDStore.resolve()
-            } else {
-                clientID = try clientIDStore.save(clientIDField.stringValue)
-                clientIDField.stringValue = clientID
-            }
+            // Con client ID disponible (override, Info.plist o entorno) va
+            // directo al navegador; solo persiste si el usuario escribió otro.
+            clientID = try clientIDStore.clientIDForSignIn(fieldValue: clientIDField.stringValue)
+            clientIDField.stringValue = clientID
         } catch AuthError.invalidResponse {
+            clientIDRow.isHidden = false
             statusLabel.stringValue = "Enter a valid Google OAuth client ID."
             return
         } catch {
-            statusLabel.stringValue = "Enter your Google OAuth client ID before signing in."
+            showMissingClientIDStatus()
             return
         }
         signInButton.isEnabled = false
