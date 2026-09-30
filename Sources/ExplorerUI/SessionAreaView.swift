@@ -5,8 +5,22 @@ import AppKit
 final class SessionAreaView: NSView {
     private let tabView = NSTabView()
     private let emptyState = NSStackView()
+    // Internos (no privados) para que los tests comprueben el truncado.
+    let title = NSTextField(labelWithString: "")
+    let subtitle = NSTextField(labelWithString: "")
 
     var isShowingEmptyState: Bool { !emptyState.isHidden }
+
+    override func layout() {
+        // El wrap de un NSTextField necesita un ancho de referencia: el del
+        // panel menos los márgenes del empty-state (16 + 16) y el padding de
+        // la celda (~2 pt por lado), que `preferredMaxLayoutWidth` no incluye.
+        let available = max(bounds.width - 32 - 4, 80)
+        if subtitle.preferredMaxLayoutWidth != available {
+            subtitle.preferredMaxLayoutWidth = available
+        }
+        super.layout()
+    }
     var sessionCount: Int { tabView.numberOfTabViewItems }
 
     override init(frame frameRect: NSRect) {
@@ -48,14 +62,22 @@ final class SessionAreaView: NSView {
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 56, weight: .light)
         icon.contentTintColor = .tertiaryLabelColor
 
-        let title = NSTextField(labelWithString: "Double-click a VM to connect")
+        title.stringValue = "Double-click a VM to connect"
         title.font = .systemFont(ofSize: 17, weight: .semibold)
         title.textColor = .secondaryLabelColor
+        // Por encima del hugging del stack (250) para no truncar con sitio de
+        // sobra; por debajo de los márgenes (required) para truncar con "…".
+        title.lineBreakMode = .byTruncatingTail
+        title.setContentCompressionResistancePriority(.defaultHigh - 10, for: .horizontal)
 
-        let subtitle = NSTextField(
-            labelWithString: "Las sesiones SSH (M1) y RDP (M2) se abrirán aquí como pestañas.")
+        subtitle.stringValue = "Las sesiones SSH (M1) y RDP (M2) se abrirán aquí como pestañas."
         subtitle.font = .systemFont(ofSize: 12)
         subtitle.textColor = .tertiaryLabelColor
+        // `labelWithString` recorta sin "…" y no hace wrap: con el panel central
+        // estrecho el subtítulo se cortaba a media palabra. Ahora envuelve.
+        subtitle.alignment = .center
+        subtitle.lineBreakMode = .byWordWrapping
+        subtitle.maximumNumberOfLines = 0
 
         emptyState.orientation = .vertical
         emptyState.alignment = .centerX
@@ -73,6 +95,7 @@ final class SessionAreaView: NSView {
             emptyState.centerXAnchor.constraint(equalTo: centerXAnchor),
             emptyState.centerYAnchor.constraint(equalTo: centerYAnchor),
             emptyState.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 16),
+            emptyState.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -16),
         ])
     }
 

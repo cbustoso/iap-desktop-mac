@@ -125,7 +125,7 @@ public actor CredentialFacade {
         // intacta y se elimina con normalidad.
         if let old = outgoing,
            (try? store.load(issuer: old.issuer, email: old.email))?.refreshToken == old.refreshToken {
-            try? store.delete(issuer: old.issuer, email: old.email)
+            _ = try? store.delete(issuer: old.issuer, email: old.email)
         }
         guard generation == gen else { return }
         credential = nil
