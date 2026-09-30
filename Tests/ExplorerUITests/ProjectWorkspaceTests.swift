@@ -85,6 +85,21 @@ private let liveResponse = """
 @Suite("ProjectWorkspace live loading", .serialized)
 @MainActor
 struct ProjectWorkspaceTests {
+    @Test func reloadAllDiscoversProjects() async throws {
+        let workspace = workspace { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/projects") {
+                return ExplorerStubURLProtocol.response(for: request, json: """
+                    {"projects":[{"projectId":"project-a","name":"A"}]}
+                    """)
+            }
+            return ExplorerStubURLProtocol.response(for: request, json: liveResponse)
+        }
+        let projects = try await workspace.reloadAll()
+        #expect(projects.map(\.name) == ["project-a"])
+        #expect(projects[0].zones.map(\.name) == ["us-central1-a", "us-central1-b"])
+    }
+
     @Test func reloadGroupsZonesAndMapsTraits() async throws {
         let workspace = workspace { request in
             ExplorerStubURLProtocol.response(for: request, json: liveResponse)
