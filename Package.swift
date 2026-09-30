@@ -33,6 +33,7 @@ let package = Package(
         ]),
         .testTarget(name: "AuthKitTests", dependencies: ["AuthKit"]),
         .testTarget(name: "TunnelKitTests", dependencies: ["TunnelKit"]),
+        .testTarget(name: "SSHKitTests", dependencies: ["SSHKit"]),
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
         .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
         .testTarget(name: "ExplorerUITests", dependencies: ["ExplorerUI"]),
