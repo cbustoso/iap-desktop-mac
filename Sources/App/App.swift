@@ -1,6 +1,7 @@
 import AppKit
 import AuthKit
 import ExplorerUI
+import GCPClient
 
 /// Punto de entrada AppKit (sin SwiftUI: esta máquina compila con CLT).
 @main
@@ -9,6 +10,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: ExplorerWindowController?
     private var loginWindowController: LoginWindowController?
     private let credentialFacade = CredentialFacade()
+    private let viewModel = ExplorerViewModel(projects: MockWorkspace.sample())
+    private let workspace = ProjectWorkspace(client: GCPClient {
+        // TODO(CBU-28): CredentialFacade token provider
+        "stub-token"
+    })
+
+    // IDs temporales hasta que onboarding permita elegir proyectos reales.
+    private let projectIDs = ["demo-web", "demo-data"]
 
     static func main() {
         let app = NSApplication.shared
@@ -21,9 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMenu()
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
-        let viewModel = ExplorerViewModel(projects: MockWorkspace.sample())
         windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
         windowController?.showWindow(nil)
+        wireRefreshAction()
         app.activate()
         snapshotIfRequested()
     }
@@ -102,8 +111,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             pending("Connection settings…", milestone: "M2"),
         ]))
 
+        let refreshItem = item("Refresh", #selector(refreshExplorer(_:)), key: "r")
+        refreshItem.target = self
         mainMenu.addItem(submenu("View", [
-            item("Refresh", #selector(ExplorerWindowController.refreshExplorer(_:)), key: "r"),
+            refreshItem,
             item("Show/Hide Properties", #selector(ExplorerWindowController.toggleProperties(_:)),
                  key: "p", modifiers: [.command, .option]),
             .separator(),
@@ -149,6 +160,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate()
     }
 
+    private func wireRefreshAction() {
+        let refreshID = NSToolbarItem.Identifier("iap.refresh")
+        guard let refreshItem = windowController?.window?.toolbar?.items.first(where: {
+            $0.itemIdentifier == refreshID
+        }) else { return }
+        refreshItem.target = self
+        refreshItem.action = #selector(refreshExplorer(_:))
+    }
+
+    @objc private func refreshExplorer(_ sender: Any?) {
+        Task { @MainActor [workspace, projectIDs, viewModel] in
+            await viewModel.reloadFromGCP(workspace: workspace, projectIDs: projectIDs)
+        }
+    }
+
     private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
         let menu = NSMenu(title: title)
         items.forEach(menu.addItem)
@@ -176,7 +202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Datos de ejemplo. SUSTITUIR por ProjectWorkspace+GCPClient (T-EXP-1/2).
+/// Fallback visible mientras no haya credenciales o una carga GCP falle.
 enum MockWorkspace {
     static func sample() -> [ProjectInfo] {
         [
