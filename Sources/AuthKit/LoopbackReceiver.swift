@@ -57,14 +57,14 @@ public actor LoopbackReceiver {
             self.codeContinuation = continuation
             Task {
                 try? await Task.sleep(for: .seconds(timeoutSeconds))
-                await self.failPending(with: AuthError.loopbackTimeout)
+                self.failPending(with: AuthError.loopbackTimeout)
             }
         }
     }
 
     /// Cancela el listener y falla la espera pendiente.
     public func cancel() async {
-        await failPending(with: AuthError.userCancelled)
+        failPending(with: AuthError.userCancelled)
         listener?.cancel()
         listener = nil
     }
