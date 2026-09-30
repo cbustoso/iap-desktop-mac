@@ -70,7 +70,7 @@ struct KeychainStoreTests {
     }
 }
 
-@Suite("CredentialFacade")
+@Suite("CredentialFacade", .serialized)  // handler stub + Keychain compartidos: sin paralelismo (R3)
 struct CredentialFacadeTests {
     @Test func authorizeEmitsAndServesToken() async throws {
         let facade = CredentialFacade(store: KeychainStore(service: "com.iap-mac.auth.test"))

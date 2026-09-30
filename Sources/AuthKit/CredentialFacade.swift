@@ -118,7 +118,13 @@ public actor CredentialFacade {
         if let token = outgoing?.refreshToken, let revoker {
             _ = await revoker.revoke(token: token)
         }
-        if let old = outgoing {
+        // Borrado condicional y atómico (mismo turno del actor, sin await en
+        // medio): solo se borra si la entrada sigue teniendo el refresh token
+        // saliente. Un re-login en la misma cuenta la habría sobrescrito y
+        // entonces sobrevive (R3-C). Con otra cuenta, la entrada vieja sigue
+        // intacta y se elimina con normalidad.
+        if let old = outgoing,
+           (try? store.load(issuer: old.issuer, email: old.email))?.refreshToken == old.refreshToken {
             try? store.delete(issuer: old.issuer, email: old.email)
         }
         guard generation == gen else { return }

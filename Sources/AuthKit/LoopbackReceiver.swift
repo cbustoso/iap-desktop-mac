@@ -27,6 +27,8 @@ public actor LoopbackReceiver {
     /// previo si `start()` se llama dos veces (review #14).
     public func start() async throws -> URL {
         await cancelListenerOnly()
+        receivedCode = nil
+        receivedError = nil
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: 0)
         let listener = try NWListener(using: parameters, on: 0)
@@ -125,8 +127,13 @@ public actor LoopbackReceiver {
     }
 
     private func deliver(error: AuthError) {
-        receivedError = error
-        failPending(with: error)
+        // Solo se guarda si no hay espera que lo consuma: si no, un segundo
+        // waitForCode lanzaría un error obsoleto (R3-D). start() también limpia.
+        if codeContinuation != nil {
+            failPending(with: error)
+        } else {
+            receivedError = error
+        }
     }
 
     private func handle(connection: NWConnection) {
