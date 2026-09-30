@@ -3,6 +3,30 @@ import Testing
 import Foundation
 @testable import AuthKit
 
+/// Stub con handler propio (no comparte estado con StubURLProtocol).
+final class SlowRevokeProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data)) =
+        { request in
+            (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+        }
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            let (response, data) = try Self.handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 private func makeCredential(
     email: String = "test-\(UUID().uuidString)@example.com",
     issuer: OidcIssuer = .gaia
@@ -86,6 +110,80 @@ struct CredentialFacadeTests {
         await facade.revoke()
         #expect(await facade.currentEmail == nil)
         await #expect(throws: AuthError.tokenExpired) { try await facade.validAccessToken() }
+    }
+
+    @Test func staleRefreshAfterSpliceThrows() async throws {
+        // Re-review R2 #1: un refresh de A que termina tras splice a B no
+        // debe mezclar sesiones.
+        let store = KeychainStore(service: "com.iap-mac.auth.test")
+        let facade = CredentialFacade(store: store)
+        let emailA = "a-\(UUID().uuidString)@example.com"
+        let a = OfflineCredential(
+            issuer: .gaia, email: emailA, refreshToken: "ra", idToken: "ia", scopes: [])
+        try await facade.authorize(a, accessToken: "at", expiresAt: Date().addingTimeInterval(60))
+        let genA = await facade.sessionGeneration
+        let emailB = "b-\(UUID().uuidString)@example.com"
+        let b = OfflineCredential(
+            issuer: .gaia, email: emailB, refreshToken: "rb", idToken: "ib", scopes: [])
+        try await facade.splice(b)
+        await #expect(throws: AuthError.tokenExpired) {
+            try await facade.storeRefreshed(
+                accessToken: "at-A", expiresIn: 60, refreshToken: "ra-new",
+                expectedGeneration: genA)
+        }
+        #expect(await facade.currentEmail == emailB)
+        #expect(try store.load(issuer: .gaia, email: emailB)?.refreshToken == "rb")
+    }
+
+    @Test func revokeDuringAuthorizeKeepsNewSession() async throws {
+        // Re-review R2 #2: authorize durante el await de /revoke no se borra.
+        let store = KeychainStore(service: "com.iap-mac.auth.test")
+        SlowRevokeProtocol.handler = { request in
+            Thread.sleep(forTimeInterval: 0.5)
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SlowRevokeProtocol.self]
+        let revoker = RevokeClient(session: URLSession(configuration: config))
+        let facade = CredentialFacade(store: store)
+        let emailA = "a-\(UUID().uuidString)@example.com"
+        try await facade.authorize(
+            OfflineCredential(
+                issuer: .gaia, email: emailA, refreshToken: "ra", idToken: "ia", scopes: []),
+            accessToken: "at", expiresAt: Date().addingTimeInterval(60))
+        let revokeTask = Task { await facade.revoke(revokingWith: revoker) }
+        try? await Task.sleep(for: .seconds(0.2))  // entra durante el POST /revoke
+        let emailB = "b-\(UUID().uuidString)@example.com"
+        try await facade.authorize(
+            OfflineCredential(
+                issuer: .gaia, email: emailB, refreshToken: "rb", idToken: "ib", scopes: []),
+            accessToken: "at-B", expiresAt: Date().addingTimeInterval(60))
+        await revokeTask.value
+        #expect(await facade.currentEmail == emailB)
+        #expect(try await facade.validAccessToken() == "at-B")
+        #expect(try store.load(issuer: .gaia, email: emailA) == nil)  // A sí se borró
+        await facade.revoke()
+    }
+
+    @Test func revokeCallsServer() async throws {
+        // Re-review R2 #5: el logout revoca en el servidor (best-effort).
+        var revoked: String?
+        SlowRevokeProtocol.handler = { request in
+            revoked = bodyString(of: request)
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [SlowRevokeProtocol.self]
+        let revoker = RevokeClient(session: URLSession(configuration: config))
+        let facade = CredentialFacade(store: KeychainStore(service: "com.iap-mac.auth.test"))
+        let credential = makeCredential()
+        try await facade.authorize(
+            credential, accessToken: "at", expiresAt: Date().addingTimeInterval(60))
+        await facade.revoke(revokingWith: revoker)
+        #expect(revoked?.contains("token=\(credential.refreshToken)") == true)
+        #expect(await facade.currentEmail == nil)
     }
 }
 

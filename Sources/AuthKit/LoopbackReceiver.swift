@@ -17,6 +17,7 @@ public actor LoopbackReceiver {
     private var listener: NWListener?
     private var port: UInt16?
     private var receivedCode: String?
+    private var receivedError: AuthError?
     private var codeContinuation: CheckedContinuation<String, Error>?
     private var timeoutTask: Task<Void, Never>?
 
@@ -65,11 +66,16 @@ public actor LoopbackReceiver {
     }
 
     /// Espera el `code` de la redirección del IdP (timeout 120 s por defecto).
-    /// Si el código llegó antes, se devuelve de inmediato (review #2).
+    /// Si el código (o un `?error=`) llegó antes, se devuelve/falla de
+    /// inmediato (re-review R2 #3).
     public func waitForCode(timeoutSeconds: UInt64 = 120) async throws -> String {
         if let code = receivedCode {
             receivedCode = nil
             return code
+        }
+        if let error = receivedError {
+            receivedError = nil
+            throw error
         }
         return try await withCheckedThrowingContinuation { continuation in
             self.codeContinuation = continuation
@@ -118,16 +124,27 @@ public actor LoopbackReceiver {
         Task { await self.cancelListenerOnly() }
     }
 
+    private func deliver(error: AuthError) {
+        receivedError = error
+        failPending(with: error)
+    }
+
     private func handle(connection: NWConnection) {
         connection.start(queue: .global(qos: .userInitiated))
         receiveHeaders(connection: connection, accumulated: Data())
     }
 
     /// Acumula hasta `\r\n\r\n` (límite 64 KB): una petición fragmentada
-    /// no debe dar 400 (review #14).
+    /// no debe dar 400 (review #14). Un error de transporte cancela sin
+    /// reintentar: rearmar el receive sobre una conexión rota entraría en
+    /// un bucle de Tasks (re-review R2 #4).
     private func receiveHeaders(connection: NWConnection, accumulated: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
             guard let self else { connection.cancel(); return }
+            if error != nil {
+                connection.cancel()
+                return
+            }
             var buffer = accumulated
             if let data { buffer.append(data) }
             if buffer.count > Self.maxHeaderBytes || isComplete && buffer.isEmpty {
@@ -155,7 +172,7 @@ public actor LoopbackReceiver {
         // ?error=access_denied (u otro) falla al momento en vez de esperar
         // al timeout (review #9 parcial; state/CSRF llega en T-AUTH-4).
         if Self.extractError(from: targetString) != nil {
-            failPending(with: AuthError.userCancelled)
+            deliver(error: .userCancelled)
             send(status: "400 Bad Request", body: "Authorization denied", over: connection)
             return
         }

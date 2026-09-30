@@ -35,7 +35,7 @@ private func stubbedSession(
 }
 
 /// URLSession entrega el body como stream ante un URLProtocol custom.
-private func bodyString(of request: URLRequest) -> String? {
+func bodyString(of request: URLRequest) -> String? {
     if let body = request.httpBody { return String(data: body, encoding: .utf8) }
     guard let stream = request.httpBodyStream else { return nil }
     stream.open()
@@ -113,7 +113,9 @@ struct TokenClientTests {
             refreshToken: "rt", idToken: "id", scopes: [])
         try await facade.authorize(credential, accessToken: "old", expiresAt: Date())
         await #expect(throws: AuthError.tokenExpired) { try await facade.validAccessToken() }
-        try await facade.storeRefreshed(accessToken: "new", expiresIn: 3600, refreshToken: "rt-rotated")
+        try await facade.storeRefreshed(
+            accessToken: "new", expiresIn: 3600, refreshToken: "rt-rotated",
+            expectedGeneration: await facade.sessionGeneration)
         #expect(try await facade.validAccessToken() == "new")
         #expect(try store.load(issuer: .gaia, email: credential.email)?.refreshToken == "rt-rotated")
         await facade.revoke()
@@ -122,7 +124,9 @@ struct TokenClientTests {
     @Test func refreshAfterRevokeThrows() async throws {
         let facade = CredentialFacade(store: KeychainStore(service: "com.iap-mac.auth.test"))
         await #expect(throws: AuthError.tokenExpired) {
-            try await facade.storeRefreshed(accessToken: "new", expiresIn: 60, refreshToken: nil)
+            try await facade.storeRefreshed(
+                accessToken: "new", expiresIn: 60, refreshToken: nil,
+                expectedGeneration: await facade.sessionGeneration)
         }
     }
 
