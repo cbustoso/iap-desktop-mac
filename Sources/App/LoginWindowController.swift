@@ -9,10 +9,12 @@ final class LoginWindowController: NSWindowController {
     typealias SessionFactory = @MainActor @Sendable (NSWindow) -> LoginSession
 
     private let facade: CredentialFacade
-    private let clientID: String
+    private let clientIDStore: ClientIDStore
     private let tokenClientFactory: TokenClientFactory
     private let sessionFactory: SessionFactory
 
+    private let clientIDField = NSTextField()
+    private let saveClientIDButton = NSButton(title: "Save Client ID", target: nil, action: nil)
     private let signInButton = NSButton(title: "Sign in with Google", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "Sign in to access Google Cloud resources.")
 
@@ -23,12 +25,14 @@ final class LoginWindowController: NSWindowController {
         sessionFactory: @escaping SessionFactory = { LoginSession(window: $0) }
     ) {
         self.facade = facade
-        self.clientID = clientID
+        self.clientIDStore = ClientIDStore(environment: clientID.isEmpty ? [:] : [
+            ClientIDStore.environmentKey: clientID
+        ])
         self.tokenClientFactory = tokenClientFactory
         self.sessionFactory = sessionFactory
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 190),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 270),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
@@ -51,13 +55,28 @@ final class LoginWindowController: NSWindowController {
 
     private func configureContent() {
         guard let contentView = window?.contentView else { return }
-        let stack = NSStackView(views: [statusLabel, signInButton])
+        let clientIDLabel = NSTextField(labelWithString: "OAuth client ID")
+        let stack = NSStackView(views: [
+            statusLabel,
+            clientIDLabel,
+            clientIDField,
+            saveClientIDButton,
+            signInButton,
+        ])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 22
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.alignment = .center
         statusLabel.maximumNumberOfLines = 2
+        clientIDLabel.alignment = .left
+        clientIDField.placeholderString = "123…apps.googleusercontent.com"
+        if let clientID = try? clientIDStore.resolve() {
+            clientIDField.stringValue = clientID
+        }
+        saveClientIDButton.bezelStyle = .rounded
+        saveClientIDButton.target = self
+        saveClientIDButton.action = #selector(saveClientID(_:))
         signInButton.bezelStyle = .rounded
         signInButton.target = self
         signInButton.action = #selector(beginSignIn(_:))
@@ -67,7 +86,18 @@ final class LoginWindowController: NSWindowController {
             stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 30),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -30),
+            clientIDLabel.widthAnchor.constraint(equalToConstant: 360),
+            clientIDField.widthAnchor.constraint(equalToConstant: 360),
         ])
+    }
+
+    @objc private func saveClientID(_ sender: Any?) {
+        do {
+            clientIDField.stringValue = try clientIDStore.save(clientIDField.stringValue)
+            statusLabel.stringValue = "Client ID saved."
+        } catch {
+            statusLabel.stringValue = "Enter a valid Google OAuth client ID."
+        }
     }
 
     @objc private func beginSignIn(_ sender: Any?) {
@@ -77,8 +107,19 @@ final class LoginWindowController: NSWindowController {
     }
 
     private func signIn() async {
-        guard !clientID.isEmpty else {
-            statusLabel.stringValue = "Set GOOGLE_OAUTH_CLIENT_ID before signing in."
+        let clientID: String
+        do {
+            if clientIDField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                clientID = try clientIDStore.resolve()
+            } else {
+                clientID = try clientIDStore.save(clientIDField.stringValue)
+                clientIDField.stringValue = clientID
+            }
+        } catch AuthError.invalidResponse {
+            statusLabel.stringValue = "Enter a valid Google OAuth client ID."
+            return
+        } catch {
+            statusLabel.stringValue = "Enter your Google OAuth client ID before signing in."
             return
         }
         signInButton.isEnabled = false
