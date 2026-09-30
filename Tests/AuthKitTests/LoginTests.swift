@@ -126,7 +126,7 @@ struct LoginTokenWiringTests {
 
         #expect(try await facade.validAccessToken() == "new-access")
         #expect(await facade.currentEmail == "wired@example.com")
-        try await facade.revoke()
+        await facade.revoke()
     }
 
     @Test func refresherUsesRefreshGrantAndStoresRotation() async throws {
@@ -155,7 +155,7 @@ struct LoginTokenWiringTests {
         #expect(try await facade.validAccessToken() == "refreshed-access")
         #expect(await facade.currentOffline?.refreshToken == "rotated-refresh")
         #expect(try store.load(issuer: .gaia, email: credential.email)?.refreshToken == "rotated-refresh")
-        try await facade.revoke()
+        await facade.revoke()
     }
 }
 
@@ -180,6 +180,6 @@ struct OfflineRestoreTests {
         await #expect(throws: AuthError.tokenExpired) {
             try await facade.validAccessToken()
         }
-        try await facade.revoke()
+        await facade.revoke()
     }
 }

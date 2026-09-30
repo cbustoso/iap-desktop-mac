@@ -11,9 +11,11 @@ ASWebAuthenticationSession
   → CredentialFacade (actor, @Observable) → KeychainStore → GCPClient interceptor
 ```
 
-- `CredentialFacade`: único punto de verdad. `authorize()`, `splice(_:)`, `revoke()`, `accessToken()` (auto-refresh con `refresh_token`). Emite `Reauthorized` vía `AsyncStream`.
+- `CredentialFacade`: único punto de verdad. `authorize()`, `splice(_:)`, `revoke()` (best-effort contra `/revoke` vía `RevokeClient`, siempre limpia y emite), `storeRefreshed` (exige sesión, guarda refresh rotado), `validAccessToken()` (el refresh automático llega en T-AUTH-4). Emite `Reauthorized` vía `AsyncStream(bufferingNewest(1))`.
+- Errores: `AuthError` incluye `network(String)` (transporte) e `invalidResponse`; `consentRequired`/`workforceNotSupported` se producen en T-AUTH-4/M4.
 - `KeychainStore`: `kSecClassGenericPassword`, servicio `com.iap-mac.auth`, cuentas `<issuer>:<email>`; guarda `{refresh, idToken, scopes, issuedAt}`. Multi-issuer Gaia + STS.
-- `LoopbackReceiver`: `NWListener(tcp, 127.0.0.1:0)`, parse HTTP mínimo (`GET /authorize/?code=…`), timeout 120 s, página de cierre. Sin `HttpListener`/HttpSys (Windows-only).
+- `TokenClient`: intercambio `/token` + refresh con formulario de codificación estricta (solo no reservados RFC 3986) y `clientSecret` opcional.
+- `LoopbackReceiver`: single-shot (cierra el listener tras entregar), guarda el código si llega antes de `waitForCode`, acumula headers fragmentados, `?error=` falla al momento con `userCancelled` (state/CSRF en T-AUTH-4).
 - Scopes: intenta `[cloud]`; si error `consent_required`, reintenta `[cloud, email]`.
 - Splice: `CredentialFacade` nunca se reemplaza; `splice` actualiza `token` in-place dentro del actor → los interceptores existentes siguen válidos.
 - WIF (M4): `StsClient` (`AuthPortalCodeFlow` + `IntrospectToken`), `WorkforceIdentity` (`principal://` parser). `GCPClient` marca `isWorkforce` para que OS Login falle tipado.

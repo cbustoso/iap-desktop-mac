@@ -58,7 +58,7 @@ struct CredentialFacadeTests {
         await task.value  // se completa solo al recibir el primer evento Reauthorized
         #expect(try await facade.validAccessToken() == "at")
         #expect(await facade.currentEmail == credential.email)
-        try await facade.revoke()
+        await facade.revoke()
     }
 
     @Test func spliceKeepsActorAndDiscardsOldIssuer() async throws {
@@ -75,7 +75,7 @@ struct CredentialFacadeTests {
         #expect(await facade.isWorkforceSession == true)
         // Sin access token tras splice hasta el refresh (T-AUTH-3)
         await #expect(throws: AuthError.tokenExpired) { try await facade.validAccessToken() }
-        try await facade.revoke()
+        await facade.revoke()
     }
 
     @Test func revokeClearsAll() async throws {
@@ -83,7 +83,7 @@ struct CredentialFacadeTests {
         let credential = makeCredential()
         try await facade.authorize(
             credential, accessToken: "at", expiresAt: Date().addingTimeInterval(60))
-        try await facade.revoke()
+        await facade.revoke()
         #expect(await facade.currentEmail == nil)
         await #expect(throws: AuthError.tokenExpired) { try await facade.validAccessToken() }
     }

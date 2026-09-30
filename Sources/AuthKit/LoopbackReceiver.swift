@@ -1,24 +1,31 @@
 import Foundation
 import Network
 
-/// Receptor loopback para OAuth installed-app (`http://127.0.0.1:{puerto}/authorize/`).
+/// Receptor loopback para OAuth installed-app (`http://127.0.0.1:{puerto}/authorize`).
 ///
 /// Equivale a `LoopbackCodeReceiver` (C#) en modo `TcpListener`: sin HttpSys
 /// (Windows-only). El puerto es efímero; se prefiere `127.0.0.1` a `localhost`
 /// por coherencia IPv4/IPv6 (REQ-AUTH-1).
+///
+/// Single-shot por código: tras entregar un `code`, el listener se cierra.
+/// Un `waitForCode` posterior espera un código nuevo (o expira).
 public actor LoopbackReceiver {
     /// Sin trailing slash: `URL.path` normaliza `/authorize/` → `/authorize`.
     public static let callbackPath = "/authorize"
+    private static let maxHeaderBytes = 64 * 1024
 
     private var listener: NWListener?
     private var port: UInt16?
+    private var receivedCode: String?
     private var codeContinuation: CheckedContinuation<String, Error>?
-    private var settled = false
+    private var timeoutTask: Task<Void, Never>?
 
     public init() {}
 
-    /// Enlaza `127.0.0.1:0` y devuelve la redirect URI. Llamar antes de `waitForCode`.
+    /// Enlaza `127.0.0.1:0` y devuelve la redirect URI. Cierra un listener
+    /// previo si `start()` se llama dos veces (review #14).
     public func start() async throws -> URL {
+        await cancelListenerOnly()
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: 0)
         let listener = try NWListener(using: parameters, on: 0)
@@ -26,21 +33,27 @@ public actor LoopbackReceiver {
         listener.newConnectionHandler = { [weak self] connection in
             Task { await self?.handle(connection: connection) }
         }
+        // NWListener invoca stateUpdateHandler en serie: la guarda local basta
+        // para no resumir dos veces (review #1: .failed tras .ready).
+        final class StartGate: @unchecked Sendable { var done = false }
+        let gate = StartGate()
         let boundPort: UInt16 = try await withCheckedThrowingContinuation { resume in
             listener.stateUpdateHandler = { state in
+                guard !gate.done else { return }
                 switch state {
                 case .ready:
+                    gate.done = true
                     if let port = listener.port?.rawValue {
                         resume.resume(returning: port)
                     } else {
                         resume.resume(throwing: AuthError.invalidResponse)
                     }
                 case .failed(let error):
+                    gate.done = true
                     resume.resume(throwing: error)
                 case .cancelled:
-                    // Ignorado a propósito: cancel() tras un start() exitoso
-                    // dispara .cancelled y la continuación ya se consumió.
-                    break
+                    gate.done = true
+                    resume.resume(throwing: AuthError.userCancelled)
                 default:
                     break
                 }
@@ -52,12 +65,17 @@ public actor LoopbackReceiver {
     }
 
     /// Espera el `code` de la redirección del IdP (timeout 120 s por defecto).
+    /// Si el código llegó antes, se devuelve de inmediato (review #2).
     public func waitForCode(timeoutSeconds: UInt64 = 120) async throws -> String {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+        if let code = receivedCode {
+            receivedCode = nil
+            return code
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             self.codeContinuation = continuation
-            Task {
+            self.timeoutTask = Task {
                 try? await Task.sleep(for: .seconds(timeoutSeconds))
-                self.failPending(with: AuthError.loopbackTimeout)
+                await self.expire()
             }
         }
     }
@@ -65,29 +83,62 @@ public actor LoopbackReceiver {
     /// Cancela el listener y falla la espera pendiente.
     public func cancel() async {
         failPending(with: AuthError.userCancelled)
+        await cancelListenerOnly()
+    }
+
+    private func cancelListenerOnly() async {
         listener?.cancel()
         listener = nil
     }
 
-    private func failPending(with error: Error) {
-        guard !settled, let continuation = codeContinuation else { return }
-        settled = true
+    private func expire() {
+        failPending(with: AuthError.loopbackTimeout)
+    }
+
+    private func settle() {
         codeContinuation = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
+    }
+
+    private func failPending(with error: Error) {
+        guard let continuation = codeContinuation else { return }
+        settle()
         continuation.resume(throwing: error)
     }
 
     private func deliver(code: String) {
-        guard !settled, let continuation = codeContinuation else { return }
-        settled = true
-        codeContinuation = nil
-        continuation.resume(returning: code)
+        receivedCode = code
+        if let continuation = codeContinuation {
+            receivedCode = nil
+            settle()
+            continuation.resume(returning: code)
+        }
+        // Single-shot: cerrar el listener tras entregar (review #14).
+        Task { await self.cancelListenerOnly() }
     }
 
     private func handle(connection: NWConnection) {
         connection.start(queue: .global(qos: .userInitiated))
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
+        receiveHeaders(connection: connection, accumulated: Data())
+    }
+
+    /// Acumula hasta `\r\n\r\n` (límite 64 KB): una petición fragmentada
+    /// no debe dar 400 (review #14).
+    private func receiveHeaders(connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, _ in
             guard let self else { connection.cancel(); return }
-            Task { await self.respond(connection: connection, request: data) }
+            var buffer = accumulated
+            if let data { buffer.append(data) }
+            if buffer.count > Self.maxHeaderBytes || isComplete && buffer.isEmpty {
+                Task { await self.respond(connection: connection, request: nil) }
+                return
+            }
+            if buffer.range(of: Data("\r\n\r\n".utf8)) != nil || isComplete {
+                Task { await self.respond(connection: connection, request: buffer) }
+            } else {
+                Task { await self.receiveHeaders(connection: connection, accumulated: buffer) }
+            }
         }
     }
 
@@ -95,9 +146,20 @@ public actor LoopbackReceiver {
         guard
             let data, let text = String(data: data, encoding: .utf8),
             let requestLine = text.components(separatedBy: "\r\n").first,
-            let target = requestLine.split(separator: " ").dropFirst().first,
-            let code = Self.extractCode(from: String(target))
+            let target = requestLine.split(separator: " ").dropFirst().first
         else {
+            send(status: "400 Bad Request", body: "Bad request", over: connection)
+            return
+        }
+        let targetString = String(target)
+        // ?error=access_denied (u otro) falla al momento en vez de esperar
+        // al timeout (review #9 parcial; state/CSRF llega en T-AUTH-4).
+        if Self.extractError(from: targetString) != nil {
+            failPending(with: AuthError.userCancelled)
+            send(status: "400 Bad Request", body: "Authorization denied", over: connection)
+            return
+        }
+        guard let code = Self.extractCode(from: targetString) else {
             send(status: "400 Bad Request", body: "Bad request", over: connection)
             return
         }
@@ -116,10 +178,22 @@ public actor LoopbackReceiver {
 
     /// Extrae `code` del target de un `GET` cuyo path sea `/authorize[/]`.
     static func extractCode(from target: String) -> String? {
-        guard
-            let components = URLComponents(string: target),
-            components.path == callbackPath || components.path == callbackPath + "/"
-        else { return nil }
-        return components.queryItems?.first(where: { $0.name == "code" })?.value
+        guard Self.isCallbackPath(target) else { return nil }
+        return queryItems(of: target)?.first(where: { $0.name == "code" })?.value
+    }
+
+    /// Extrae `error` del target (`?error=access_denied`, etc.).
+    static func extractError(from target: String) -> String? {
+        guard Self.isCallbackPath(target) else { return nil }
+        return queryItems(of: target)?.first(where: { $0.name == "error" })?.value
+    }
+
+    private static func isCallbackPath(_ target: String) -> Bool {
+        guard let path = URLComponents(string: target)?.path else { return false }
+        return path == callbackPath || path == callbackPath + "/"
+    }
+
+    private static func queryItems(of target: String) -> [URLQueryItem]? {
+        URLComponents(string: target)?.queryItems
     }
 }

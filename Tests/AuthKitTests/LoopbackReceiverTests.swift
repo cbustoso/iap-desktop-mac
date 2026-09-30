@@ -27,6 +27,31 @@ struct LoopbackReceiverTests {
         #expect(try await task.value == "auth-code-123")
     }
 
+    @Test func codeBeforeWaitIsKept() async throws {
+        // Review #2: el código que llega antes de waitForCode no se descarta.
+        let receiver = LoopbackReceiver()
+        let uri = try await receiver.start()
+        var components = URLComponents(url: uri, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "code", value: "early-code")]
+        let (_, response) = try await URLSession.shared.data(from: components.url!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        #expect(try await receiver.waitForCode(timeoutSeconds: 10) == "early-code")
+        await receiver.cancel()
+    }
+
+    @Test func errorFailsFast() async throws {
+        // Review #9: ?error=access_denied falla al momento, no espera 120 s.
+        let receiver = LoopbackReceiver()
+        let uri = try await receiver.start()
+        var components = URLComponents(url: uri, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "error", value: "access_denied")]
+        let task = Task { try await receiver.waitForCode(timeoutSeconds: 30) }
+        let (_, response) = try await URLSession.shared.data(from: components.url!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 400)
+        await #expect(throws: AuthError.userCancelled) { try await task.value }
+        await receiver.cancel()
+    }
+
     @Test func timeoutThrows() async throws {
         let receiver = LoopbackReceiver()
         _ = try await receiver.start()
