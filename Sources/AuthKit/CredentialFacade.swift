@@ -61,6 +61,12 @@ public actor CredentialFacade {
         emitReauthorized()
     }
 
+    /// Actualiza el access token tras un refresh (T-AUTH-3). No reemite evento.
+    public func storeRefreshed(accessToken: String, expiresIn: TimeInterval) {
+        self.accessToken = accessToken
+        self.accessTokenExpiry = Date().addingTimeInterval(expiresIn)
+    }
+
     /// Cierra sesión: limpia memoria + Keychain y notifica.
     public func revoke() throws {
         if let current = credential {

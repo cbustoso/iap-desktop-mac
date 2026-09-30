@@ -105,6 +105,18 @@ struct TokenClientTests {
         #expect(response.refreshToken == nil)
     }
 
+    @Test func refreshStoredInFacade() async throws {
+        let facade = CredentialFacade(store: KeychainStore(service: "com.iap-mac.auth.test"))
+        let credential = OfflineCredential(
+            issuer: .gaia, email: "refresh-\(UUID().uuidString)@example.com",
+            refreshToken: "rt", idToken: "id", scopes: [])
+        try await facade.authorize(credential, accessToken: "old", expiresAt: Date())
+        await #expect(throws: AuthError.tokenExpired) { try await facade.validAccessToken() }
+        await facade.storeRefreshed(accessToken: "new", expiresIn: 3600)
+        #expect(try await facade.validAccessToken() == "new")
+        try await facade.revoke()
+    }
+
     @Test func non200Throws() async throws {
         let session = stubbedSession { request in
             (HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!, Data())
