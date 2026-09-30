@@ -3,7 +3,10 @@ import Testing
 @testable import GCPClient
 
 final class GCPStubURLProtocol: URLProtocol, @unchecked Sendable {
-    nonisolated(unsafe) static var handler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    // @Sendable obligatorio: CFNetwork ejecuta el handler fuera del actor
+    // que lo creó; sin esto, trap SE-0423 (ver fix T-EXP-2 en ExplorerUITests).
+    typealias Handler = @Sendable (URLRequest) throws -> (HTTPURLResponse, Data)
+    nonisolated(unsafe) static var handler: Handler?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
