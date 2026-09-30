@@ -1,0 +1,9 @@
+disabled_rules:
+  - trailing_whitespace
+opt_in_rules:
+  - strict_concurrency
+  - redundant_sendable
+  - explicit_actor_sendable
+included:
+  - Sources
+  - Tests
