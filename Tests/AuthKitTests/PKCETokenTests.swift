@@ -170,9 +170,9 @@ struct TokenClientTests {
         let session = stubbedSession { _ in throw Boom() }
         let client = TokenClient(clientID: "id", session: session)
         do {
-            try await client.refresh(refreshToken: "rt")
+            _ = try await client.refresh(refreshToken: "rt")
             Issue.record("se esperaba AuthError.network")
-        } catch let AuthError.network(_) {
+        } catch AuthError.network {
             // OK: el error de transporte va envuelto (URLSession lo decora).
         }
     }

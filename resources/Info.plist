@@ -24,5 +24,16 @@
     <string>NSApplication</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!--
+      OAuth client ID por defecto (CBU-36). Maintainer: sustituir el
+      placeholder por un client ID de tipo "Desktop app" creado en
+      https://console.cloud.google.com/apis/credentials
+      (formato: 123456789-abc.apps.googleusercontent.com).
+      Con el placeholder, la app usa el override guardado por el usuario o
+      la variable de entorno GOOGLE_OAUTH_CLIENT_ID. Un client ID de app
+      instalada no es secreto (Google lo documenta así).
+    -->
+    <key>OAuthClientID</key>
+    <string>__OAUTH_CLIENT_ID__</string>
 </dict>
 </plist>
