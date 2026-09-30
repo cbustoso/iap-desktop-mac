@@ -14,9 +14,12 @@ final class LoginWindowController: NSWindowController {
     private let sessionFactory: SessionFactory
 
     private let clientIDField = NSTextField()
-    private let saveClientIDButton = NSButton(title: "Save Client ID", target: nil, action: nil)
-    private let signInButton = NSButton(title: "Sign in with Google", target: nil, action: nil)
-    private let statusLabel = NSTextField(labelWithString: "Sign in to access Google Cloud resources.")
+    private let saveClientIDButton = NSButton(title: "Save", target: nil, action: nil)
+    private let signInButton = NSButton(title: "Sign in", target: nil, action: nil)
+    private let statusLabel = NSTextField(labelWithString: "")
+    private let headerLabel = NSTextField(labelWithString: "IAP Desktop Mac")
+    private let descriptionLabel = NSTextField(labelWithString:
+        "Sign in and start using IAP Desktop Mac to securely connect to your Linux and Windows VMs.")
 
     init(
         facade: CredentialFacade,
@@ -32,7 +35,7 @@ final class LoginWindowController: NSWindowController {
         self.sessionFactory = sessionFactory
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 270),
+            contentRect: NSRect(x: 0, y: 0, width: 400, height: 330),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
@@ -55,13 +58,36 @@ final class LoginWindowController: NSWindowController {
 
     private func configureContent() {
         guard let contentView = window?.contentView else { return }
-        let clientIDLabel = NSTextField(labelWithString: "OAuth client ID")
+        headerLabel.font = .systemFont(ofSize: 20, weight: .semibold)
+        headerLabel.alignment = .center
+        descriptionLabel.font = .systemFont(ofSize: 12)
+        descriptionLabel.alignment = .center
+        descriptionLabel.maximumNumberOfLines = 0
+        descriptionLabel.lineBreakMode = .byWordWrapping
+        descriptionLabel.preferredMaxLayoutWidth = 340
+
+        let signInRow = NSStackView(views: [GoogleGView(), signInButton])
+        signInRow.orientation = .horizontal
+        signInRow.alignment = .centerY
+        signInRow.spacing = 8
+
+        let clientIDRow = NSStackView(views: [clientIDField, saveClientIDButton])
+        clientIDRow.orientation = .horizontal
+        clientIDRow.spacing = 8
+        clientIDField.placeholderString = "OAuth client ID"
+
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let versionLabel = NSTextField(labelWithString: "Version \(version ?? "0.1")")
+        versionLabel.font = .systemFont(ofSize: 11)
+        versionLabel.textColor = .secondaryLabelColor
+        versionLabel.alignment = .right
+
         let stack = NSStackView(views: [
+            headerLabel,
+            descriptionLabel,
+            signInRow,
+            clientIDRow,
             statusLabel,
-            clientIDLabel,
-            clientIDField,
-            saveClientIDButton,
-            signInButton,
         ])
         stack.orientation = .vertical
         stack.alignment = .centerX
@@ -69,11 +95,10 @@ final class LoginWindowController: NSWindowController {
         stack.translatesAutoresizingMaskIntoConstraints = false
         statusLabel.alignment = .center
         statusLabel.maximumNumberOfLines = 2
-        clientIDLabel.alignment = .left
-        clientIDField.placeholderString = "123…apps.googleusercontent.com"
         if let clientID = try? clientIDStore.resolve() {
             clientIDField.stringValue = clientID
         }
+        clientIDField.widthAnchor.constraint(equalToConstant: 250).isActive = true
         saveClientIDButton.bezelStyle = .rounded
         saveClientIDButton.target = self
         saveClientIDButton.action = #selector(saveClientID(_:))
@@ -81,14 +106,50 @@ final class LoginWindowController: NSWindowController {
         signInButton.target = self
         signInButton.action = #selector(beginSignIn(_:))
         contentView.addSubview(stack)
+        contentView.addSubview(versionLabel)
+        versionLabel.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor, constant: 10),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor, constant: 30),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor, constant: -30),
-            clientIDLabel.widthAnchor.constraint(equalToConstant: 360),
-            clientIDField.widthAnchor.constraint(equalToConstant: 360),
+            versionLabel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            versionLabel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -8),
         ])
+    }
+
+    /// Letra G multicolor estilo Google, dibujada por código (sin assets).
+    final class GoogleGView: NSView {
+        override var intrinsicContentSize: NSSize { NSSize(width: 18, height: 18) }
+
+        override func draw(_ dirtyRect: NSRect) {
+            super.draw(dirtyRect)
+            let side = min(bounds.width, bounds.height)
+            let lineWidth = side * 0.24
+            let radius = side / 2 - lineWidth / 2 - 0.5
+            let center = NSPoint(x: bounds.midX, y: bounds.midY)
+            // Arcos en sentido antihorario con hueco al este; barra roja al centro.
+            let segments: [(start: CGFloat, end: CGFloat, color: NSColor)] = [
+                (25, 140, NSColor(calibratedRed: 0.26, green: 0.52, blue: 0.96, alpha: 1)),   // azul
+                (140, 245, NSColor(calibratedRed: 0.20, green: 0.66, blue: 0.33, alpha: 1)),  // verde
+                (245, 300, NSColor(calibratedRed: 0.98, green: 0.75, blue: 0.0, alpha: 1)),   // amarillo
+                (300, 335, NSColor(calibratedRed: 0.92, green: 0.26, blue: 0.21, alpha: 1)),  // rojo
+            ]
+            for segment in segments {
+                let path = NSBezierPath()
+                path.appendArc(withCenter: center, radius: radius,
+                               startAngle: segment.start, endAngle: segment.end)
+                path.lineWidth = lineWidth
+                path.lineCapStyle = .butt
+                segment.color.setStroke()
+                path.stroke()
+            }
+            let bar = NSBezierPath(rect: NSRect(
+                x: center.x - lineWidth / 2, y: center.y - lineWidth / 2,
+                width: radius + lineWidth / 2, height: lineWidth))
+            NSColor(calibratedRed: 0.92, green: 0.26, blue: 0.21, alpha: 1).setFill()
+            bar.fill()
+        }
     }
 
     @objc private func saveClientID(_ sender: Any?) {

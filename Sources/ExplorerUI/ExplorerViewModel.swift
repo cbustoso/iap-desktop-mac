@@ -28,17 +28,32 @@ public final class ExplorerViewModel {
         let selectedID = selection?.id
         do {
             let loadedProjects = try await workspace.reload(projectIDs: projectIDs)
-            selection = selectedID.flatMap { id in
-                loadedProjects.lazy
-                    .flatMap(\.zones)
-                    .flatMap(\.instances)
-                    .first { $0.id == id }
-            }
-            isLive = true
-            projects = loadedProjects
+            applyLoaded(loadedProjects, selectedID: selectedID)
         } catch {
             // Keep the last usable snapshot (including the initial mock data).
         }
+    }
+
+    /// Descubre todos los proyectos de la cuenta y los carga (flujo IAP:
+    /// tras el login el árbol se llena solo).
+    public func reloadAllFromGCP(workspace: ProjectWorkspace) async {
+        let selectedID = selection?.id
+        do {
+            applyLoaded(try await workspace.reloadAll(), selectedID: selectedID)
+        } catch {
+            // Keep the last usable snapshot (including the initial mock data).
+        }
+    }
+
+    private func applyLoaded(_ loadedProjects: [ProjectInfo], selectedID: String?) {
+        selection = selectedID.flatMap { id in
+            loadedProjects.lazy
+                .flatMap(\.zones)
+                .flatMap(\.instances)
+                .first { $0.id == id }
+        }
+        isLive = true
+        projects = loadedProjects
     }
 
     /// Proyectos con zonas/instancias ya filtradas (estructura preservada).

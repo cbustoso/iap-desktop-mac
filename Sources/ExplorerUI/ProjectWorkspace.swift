@@ -8,6 +8,14 @@ public actor ProjectWorkspace {
         self.client = client
     }
 
+    /// Descubre todos los proyectos visibles y carga sus instancias.
+    /// Equivale al "Add project" implícito del IAP original: tras el login,
+    /// el árbol se llena solo, sin picker.
+    public func reloadAll() async throws -> [ProjectInfo] {
+        let projects = try await client.listProjects()
+        return try await reload(projectIDs: projects.map(\.projectId))
+    }
+
     /// Loads every configured project concurrently. GCPClient turns 403/404
     /// responses into an empty instance list, so inaccessible projects remain
     /// in the snapshot with no zones instead of failing the whole reload.

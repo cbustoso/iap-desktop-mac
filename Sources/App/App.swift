@@ -11,13 +11,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var loginWindowController: LoginWindowController?
     private let credentialFacade = CredentialFacade()
     private let viewModel = ExplorerViewModel(projects: MockWorkspace.sample())
-    private let workspace = ProjectWorkspace(client: GCPClient {
-        // TODO(CBU-28): CredentialFacade token provider
-        "stub-token"
-    })
 
-    // IDs temporales hasta que onboarding permita elegir proyectos reales.
-    private let projectIDs = ["demo-web", "demo-data"]
+    /// Tokens reales vía fachada (con refresh automático). Al arrancar sin
+    /// sesión expira al primer uso y el árbol conserva el mock (fallback).
+    private lazy var workspace: ProjectWorkspace = {
+        let facade = self.credentialFacade
+        return ProjectWorkspace(client: GCPClient {
+            let clientID = (try? ClientIDStore().resolve()) ?? ""
+            return try await TokenRefresher().refreshedAccessToken(
+                facade: facade,
+                client: TokenClient(clientID: clientID))
+        })
+    }()
 
     static func main() {
         let app = NSApplication.shared
@@ -34,7 +39,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.showWindow(nil)
         wireRefreshAction()
         app.activate()
+        restoreSessionAndLoad()
         snapshotIfRequested()
+    }
+
+    /// Como el IAP original: al arrancar restaura la sesión del Keychain y
+    /// carga proyectos/instancias automáticamente; tras cada login/logout
+    /// (evento Reauthorized) recarga si hay sesión. Sin sesión o con fallo,
+    /// el árbol conserva el mock visible.
+    private func restoreSessionAndLoad() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.restoreSession()
+            self.observeSession()
+            await self.loadLiveData()
+        }
+    }
+
+    private func restoreSession() async {
+        let store = KeychainStore()
+        guard
+            let accounts = try? store.accounts(),
+            let first = accounts.first,
+            let credential = try? store.load(issuer: first.issuer, email: first.email)
+        else { return }
+        await credentialFacade.restoreOffline(credential)
+    }
+
+    private func observeSession() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for await _ in await self.credentialFacade.reauthorized() {
+                if await self.credentialFacade.currentEmail != nil {
+                    await self.loadLiveData()
+                }
+            }
+        }
+    }
+
+    private func loadLiveData() async {
+        await viewModel.reloadAllFromGCP(workspace: workspace)
     }
 
     /// Solo tooling (`tools/snapshot.sh`): con `IAP_SNAPSHOT=<png>` renderiza la
@@ -51,9 +95,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         default: break
         }
         if let id = env["IAP_SNAPSHOT_SELECT"] { windowController?.selectNode(id: id) }
+        // IAP_SNAPSHOT_LOGIN=1 captura la ventana Sign In en vez de la principal.
+        let target: NSWindow? = env["IAP_SNAPSHOT_LOGIN"] == "1"
+            ? { showLoginWindow(nil); return loginWindowController?.window }()
+            : windowController?.window
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
-            if let frame = windowController?.window?.contentView?.superview,
+            if let frame = target?.contentView?.superview,
                let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) {
                 frame.cacheDisplay(in: frame.bounds, to: rep)
                 try? rep.representation(using: .png, properties: [:])?
@@ -185,8 +233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func refreshExplorer(_ sender: Any?) {
-        Task { @MainActor [workspace, projectIDs, viewModel] in
-            await viewModel.reloadFromGCP(workspace: workspace, projectIDs: projectIDs)
+        Task { @MainActor [weak self] in
+            await self?.loadLiveData()
         }
     }
 
