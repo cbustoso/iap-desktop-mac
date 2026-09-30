@@ -7,10 +7,19 @@ let package = Package(
     products: [
         .executable(name: "App", targets: ["App"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.14.0"),
+    ],
     targets: [
         .target(name: "AuthKit"),
         .target(name: "GCPClient"),
-        .target(name: "TunnelKit"),
+        .target(
+            name: "TunnelKit",
+            dependencies: [
+                .product(name: "WebSocketKit", package: "websocket-kit"),
+                .product(name: "NIOCore", package: "swift-nio"),
+            ]),
         .target(name: "SSHKit"),
         .target(name: "TerminalUI"),
         .target(name: "SFTPKit"),
