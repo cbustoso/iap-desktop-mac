@@ -13,6 +13,9 @@ public struct TokenRefresher: Sendable {
         do {
             return try await facade.validAccessToken()
         } catch AuthError.tokenExpired {
+            // Época ANTES del refresh: si cambia en vuelo, storeRefreshed
+            // rechaza y no mezcla sesiones (re-review R2 #1).
+            let gen = await facade.sessionGeneration
             guard let offline = await facade.currentOffline else {
                 throw AuthError.tokenExpired
             }
@@ -20,7 +23,8 @@ public struct TokenRefresher: Sendable {
             try await facade.storeRefreshed(
                 accessToken: response.accessToken,
                 expiresIn: max(0, TimeInterval(response.expiresIn) - max(0, skewSeconds)),
-                refreshToken: response.refreshToken)
+                refreshToken: response.refreshToken,
+                expectedGeneration: gen)
             return response.accessToken
         }
     }

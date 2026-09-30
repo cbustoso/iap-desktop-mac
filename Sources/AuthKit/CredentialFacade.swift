@@ -9,6 +9,9 @@ public actor CredentialFacade {
     private var credential: OfflineCredential?
     private var accessToken: String?
     private var accessTokenExpiry: Date?
+    /// Época de sesión: se incrementa en cada authorize/splice/revoke/restore.
+    /// Permite detectar refreshes o revokes obsoletos en vuelo (re-review R2 #1/#2).
+    private var generation: UInt64 = 0
     private var continuations: [UUID: AsyncStream<Void>.Continuation] = [:]
     private let store: KeychainStore
 
@@ -16,10 +19,14 @@ public actor CredentialFacade {
         self.store = store
     }
 
+    /// Época actual: captúrala antes de un refresh y pásala a `storeRefreshed`.
+    public var sessionGeneration: UInt64 { generation }
+
     /// Flujo de eventos `Reauthorized` (cambio de cuenta o logout).
+    /// `bufferingNewest(1)`: es una señal de flanco, basta el último (review #16).
     public func reauthorized() -> AsyncStream<Void> {
         let id = UUID()
-        return AsyncStream { continuation in
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             self.continuations[id] = continuation
             continuation.onTermination = { @Sendable _ in
                 Task { await self.removeContinuation(id: id) }
@@ -45,40 +52,47 @@ public actor CredentialFacade {
         self.credential = credential
         self.accessToken = accessToken
         self.accessTokenExpiry = expiresAt
+        generation &+= 1
         emitReauthorized()
     }
 
     /// Cambio de cuenta sin reemplazar el actor (equivale a `Splice()` C#).
     /// Si cambia el issuer Gaia↔STS, descarta la credencial offline anterior.
+    /// Orden: guardar la nueva ANTES de borrar la anterior para no dejar
+    /// Keychain y memoria inconsistentes si el guardado falla (review #8).
     public func splice(_ newCredential: OfflineCredential) throws {
+        try store.save(newCredential)
         if let current = credential, current.issuer != newCredential.issuer {
             try store.delete(issuer: current.issuer, email: current.email)
         }
-        try store.save(newCredential)
         self.credential = newCredential
         self.accessToken = nil
         self.accessTokenExpiry = nil
+        generation &+= 1
         emitReauthorized()
     }
 
-    /// Actualiza el access token tras un refresh (T-AUTH-3). No reemite evento.
-    public func storeRefreshed(accessToken: String, expiresIn: TimeInterval) {
-        self.accessToken = accessToken
-        self.accessTokenExpiry = Date().addingTimeInterval(expiresIn)
-    }
-
-    /// Stores an access-token refresh and persists refresh-token rotation.
+    /// Actualiza el access token tras un refresh y guarda el refresh token
+    /// rotado si el servidor devolvió uno nuevo (review #6, re-review R2 #1).
+    /// `expectedGeneration` debe ser la época capturada ANTES del refresh:
+    /// si cambió (splice/revoke/authorize en vuelo), lanza `tokenExpired`
+    /// sin tocar nada — nunca mezcla tokens de sesiones distintas.
+    /// Si el guardado en Keychain falla tras una rotación, el token nuevo se
+    /// pierde (inevitable: sin persistencia no hay sesión que guardar) y la
+    /// próxima llamada refrescará o pedirá login.
     public func storeRefreshed(
-        accessToken: String,
-        expiresIn: TimeInterval,
-        refreshToken: String?
+        accessToken: String, expiresIn: TimeInterval, refreshToken: String?,
+        expectedGeneration: UInt64
     ) throws {
-        if let refreshToken, var current = credential {
-            current.refreshToken = refreshToken
-            current.issuedAt = Date()
-            try store.save(current)
-            credential = current
+        guard expectedGeneration == generation, var current = credential else {
+            throw AuthError.tokenExpired
         }
+        if let rotated = refreshToken {
+            current.refreshToken = rotated
+            current.issuedAt = Date()
+        }
+        try store.save(current)
+        self.credential = current
         self.accessToken = accessToken
         self.accessTokenExpiry = Date().addingTimeInterval(expiresIn)
     }
@@ -89,16 +103,35 @@ public actor CredentialFacade {
         self.credential = credential
         accessToken = nil
         accessTokenExpiry = nil
+        generation &+= 1
     }
 
-    /// Cierra sesión: limpia memoria + Keychain y notifica.
-    public func revoke() throws {
-        if let current = credential {
-            try store.delete(issuer: current.issuer, email: current.email)
+    /// Cierra sesión (REQ-AUTH-3, re-review R2 #2/#5): intenta revocar en el
+    /// servidor (best-effort) y limpia la sesión que existía AL ENTRAR.
+    /// Si un authorize/splice entra durante el await de red, al volver se
+    /// detecta por época y NO se toca la sesión nueva (solo se borra del
+    /// Keychain la entrada vieja). El logout nunca deja al usuario atrapado;
+    /// el token expira igualmente por tiempo.
+    public func revoke(revokingWith revoker: RevokeClient? = nil) async {
+        let outgoing = credential
+        let gen = generation
+        if let token = outgoing?.refreshToken, let revoker {
+            _ = await revoker.revoke(token: token)
         }
+        // Borrado condicional y atómico (mismo turno del actor, sin await en
+        // medio): solo se borra si la entrada sigue teniendo el refresh token
+        // saliente. Un re-login en la misma cuenta la habría sobrescrito y
+        // entonces sobrevive (R3-C). Con otra cuenta, la entrada vieja sigue
+        // intacta y se elimina con normalidad.
+        if let old = outgoing,
+           (try? store.load(issuer: old.issuer, email: old.email))?.refreshToken == old.refreshToken {
+            try? store.delete(issuer: old.issuer, email: old.email)
+        }
+        guard generation == gen else { return }
         credential = nil
         accessToken = nil
         accessTokenExpiry = nil
+        generation &+= 1
         emitReauthorized()
     }
 

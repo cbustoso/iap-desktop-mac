@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
             signInItem(),
+            signOutItem(),
             item("Settings…", #selector(ExplorerWindowController.openSettings(_:)), key: ","),
             .separator(),
             item("Hide \(appName)", #selector(NSApplication.hide(_:)), key: "h"),
@@ -137,6 +138,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuItem = item("Sign In…", #selector(showLoginWindow(_:)))
         menuItem.target = self
         return menuItem
+    }
+
+    /// REQ-AUTH-3 en producto: cierra sesión revocando en el servidor
+    /// (best-effort dentro de la fachada). Re-review R2 #5.
+    private func signOutItem() -> NSMenuItem {
+        let menuItem = item("Sign Out", #selector(signOut(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func signOut(_ sender: Any?) {
+        Task {
+            await credentialFacade.revoke(revokingWith: RevokeClient())
+        }
     }
 
     @objc private func showLoginWindow(_ sender: Any?) {

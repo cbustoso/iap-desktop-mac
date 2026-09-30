@@ -35,7 +35,7 @@ private func stubbedSession(
 }
 
 /// URLSession entrega el body como stream ante un URLProtocol custom.
-private func bodyString(of request: URLRequest) -> String? {
+func bodyString(of request: URLRequest) -> String? {
     if let body = request.httpBody { return String(data: body, encoding: .utf8) }
     guard let stream = request.httpBodyStream else { return nil }
     stream.open()
@@ -106,15 +106,96 @@ struct TokenClientTests {
     }
 
     @Test func refreshStoredInFacade() async throws {
-        let facade = CredentialFacade(store: KeychainStore(service: "com.iap-mac.auth.test"))
+        let store = KeychainStore(service: "com.iap-mac.auth.test")
+        let facade = CredentialFacade(store: store)
         let credential = OfflineCredential(
             issuer: .gaia, email: "refresh-\(UUID().uuidString)@example.com",
             refreshToken: "rt", idToken: "id", scopes: [])
         try await facade.authorize(credential, accessToken: "old", expiresAt: Date())
         await #expect(throws: AuthError.tokenExpired) { try await facade.validAccessToken() }
-        await facade.storeRefreshed(accessToken: "new", expiresIn: 3600)
+        try await facade.storeRefreshed(
+            accessToken: "new", expiresIn: 3600, refreshToken: "rt-rotated",
+            expectedGeneration: await facade.sessionGeneration)
         #expect(try await facade.validAccessToken() == "new")
-        try await facade.revoke()
+        #expect(try store.load(issuer: .gaia, email: credential.email)?.refreshToken == "rt-rotated")
+        await facade.revoke()
+    }
+
+    @Test func refreshAfterRevokeThrows() async throws {
+        let facade = CredentialFacade(store: KeychainStore(service: "com.iap-mac.auth.test"))
+        await #expect(throws: AuthError.tokenExpired) {
+            try await facade.storeRefreshed(
+                accessToken: "new", expiresIn: 60, refreshToken: nil,
+                expectedGeneration: await facade.sessionGeneration)
+        }
+    }
+
+    @Test func formEscapesSpecialChars() async throws {
+        // Review #3: `+ & = ?` y espacios deben ir escapados (un `+` no puede
+        // llegar como espacio).
+        var capturedBody: String?
+        let session = stubbedSession { request in
+            capturedBody = bodyString(of: request)
+            let json = """
+                {"access_token":"at","expires_in":3600}
+                """.data(using: .utf8)!
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, json)
+        }
+        let client = TokenClient(clientID: "id", session: session)
+        _ = try await client.refresh(refreshToken: "a+b&c=d?e f")
+        #expect(capturedBody?.contains("refresh_token=a%2Bb%26c%3Dd%3Fe%20f") == true)
+    }
+
+    @Test func clientSecretIncludedWhenSet() async throws {
+        var capturedBody: String?
+        let session = stubbedSession { request in
+            capturedBody = bodyString(of: request)
+            let json = """
+                {"access_token":"at","expires_in":3600}
+                """.data(using: .utf8)!
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, json)
+        }
+        let withSecret = TokenClient(clientID: "id", clientSecret: "s3cret", session: session)
+        _ = try await withSecret.refresh(refreshToken: "rt")
+        #expect(capturedBody?.contains("client_secret=s3cret") == true)
+        let withoutSecret = TokenClient(clientID: "id", session: session)
+        _ = try await withoutSecret.refresh(refreshToken: "rt")
+        #expect(capturedBody?.contains("client_secret") == false)
+    }
+
+    @Test func transportErrorWrapped() async throws {
+        struct Boom: Error {}
+        let session = stubbedSession { _ in throw Boom() }
+        let client = TokenClient(clientID: "id", session: session)
+        do {
+            try await client.refresh(refreshToken: "rt")
+            Issue.record("se esperaba AuthError.network")
+        } catch let AuthError.network(_) {
+            // OK: el error de transporte va envuelto (URLSession lo decora).
+        }
+    }
+
+    @Test func tokenResponseRedacted() {
+        let response = TokenResponse(
+            accessToken: "secret-at", expiresIn: 3600, refreshToken: "secret-rt",
+            idToken: "secret-id", scope: "cloud")
+        #expect(!response.description.contains("secret-at"))
+        #expect(!response.description.contains("secret-rt"))
+        #expect(!response.debugDescription.contains("secret-id"))
+    }
+
+    @Test func revokePostsToken() async throws {
+        var capturedBody: String?
+        let session = stubbedSession { request in
+            capturedBody = bodyString(of: request)
+            return (
+                HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data())
+        }
+        let revoker = RevokeClient(session: session)
+        #expect(await revoker.revoke(token: "doomed") == true)
+        #expect(capturedBody?.contains("token=doomed") == true)
     }
 
     @Test func non200Throws() async throws {
