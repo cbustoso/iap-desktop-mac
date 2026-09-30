@@ -25,6 +25,10 @@ KeyProvisioner (ephemeral RSA-3072/ECDSA, CryptoKit/Security.framework)
 
 ## Decisión de stack SSH (a resolver en spike T-SSH-1)
 
+> **Resuelto (CBU-37): `swift-nio-ssh`.** Ver `specs/ssh/transport-decision.md`, que
+> corrige esta tabla con lo verificado en el código fuente (sin RSA, solo AES-GCM, SFTP
+> implementable encima). La tabla de abajo se conserva como punto de partida.
+
 No se fija ganador en esta spec (REQ-SSH-1). Comparación de partida para el spike,
 verificada contra el código fuente real antes de decidir (mismo rigor que
 `specs/tunnel/transport-decision.md`):
