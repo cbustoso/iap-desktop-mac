@@ -83,7 +83,7 @@ public actor LoopbackReceiver {
             self.codeContinuation = continuation
             self.timeoutTask = Task {
                 try? await Task.sleep(for: .seconds(timeoutSeconds))
-                await self.expire()
+                self.expire()  // la Task hereda el aislamiento del actor
             }
         }
     }

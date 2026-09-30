@@ -5,9 +5,10 @@ import AppKit
 final class StatusBarView: NSView {
     static let height: CGFloat = 24
 
-    private let summaryLabel = NSTextField(labelWithString: "")
-    private let noteLabel = NSTextField(labelWithString: "")
-    private let accountLabel = NSTextField(labelWithString: "Sin sesión — cuenta pendiente (M1)")
+    // Internos (no privados) para que los tests comprueben el truncado.
+    let summaryLabel = NSTextField(labelWithString: "")
+    let noteLabel = NSTextField(labelWithString: "")
+    let accountLabel = NSTextField(labelWithString: "Sin sesión — cuenta pendiente (M1)")
 
     var summary: String {
         get { summaryLabel.stringValue }
@@ -39,12 +40,25 @@ final class StatusBarView: NSView {
             label.lineBreakMode = .byTruncatingTail
         }
         noteLabel.textColor = .tertiaryLabelColor
+
+        // Orden explícito de compresión (antes summary y account empataban a
+        // 750): 1º la nota transitoria, luego el resumen y la cuenta al final;
+        // el icono nunca. Resumen y cuenta quedan por encima del "stay put" de
+        // la ventana (500): antes de truncarlos, la ventana mantiene su ancho mínimo.
         noteLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        summaryLabel.setContentCompressionResistancePriority(.defaultHigh - 10, for: .horizontal)
+        accountLabel.setContentCompressionResistancePriority(.defaultHigh + 10, for: .horizontal)
+        // Las etiquetas no se estiran: el hueco lo absorbe el spacer.
+        for label in [summaryLabel, noteLabel, accountLabel] {
+            label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        }
 
         let accountIcon = NSImageView()
         accountIcon.image = NSImage(systemSymbolName: "person.crop.circle", accessibilityDescription: "Cuenta")
         accountIcon.contentTintColor = .secondaryLabelColor
         accountIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .regular)
+        accountIcon.setContentCompressionResistancePriority(.required, for: .horizontal)
+        accountIcon.setContentHuggingPriority(.required, for: .horizontal)
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
