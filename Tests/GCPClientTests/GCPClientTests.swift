@@ -31,7 +31,7 @@ final class GCPStubURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 private func stubbedSession(
-    handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    handler: @Sendable @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
 ) -> URLSession {
     GCPStubURLProtocol.handler = handler
     let configuration = URLSessionConfiguration.ephemeral
@@ -57,7 +57,16 @@ private func client(session: URLSession) -> GCPClient {
 @Suite("GCPClient", .serialized)
 struct GCPClientTests {
     @Test func listProjectsPaginates() async throws {
-        var requestedPageTokens: [String?] = []
+        // El handler es @Sendable (fix SE-0423): la recolección usa lock.
+        // Lectura posterior al await: sincronizada por el propio await.
+        final class Collector: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var tokens: [String?] = []
+            func append(_ token: String?) {
+                lock.withLock { tokens.append(token) }
+            }
+        }
+        let requestedPageTokens = Collector()
         let session = stubbedSession { request in
             #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-token")
             let pageToken = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
@@ -79,9 +88,9 @@ struct GCPClientTests {
             GCPProject(projectId: "project-a", displayName: "Alpha"),
             GCPProject(projectId: "project-b", displayName: "Beta"),
         ])
-        #expect(requestedPageTokens.count == 2)
-        #expect(requestedPageTokens[0] == nil)
-        #expect(requestedPageTokens[1] == "page-2")
+        #expect(requestedPageTokens.tokens.count == 2)
+        #expect(requestedPageTokens.tokens[0] == nil)
+        #expect(requestedPageTokens.tokens[1] == "page-2")
     }
 
     @Test func aggregatedListParsesInstancesAcrossZones() async throws {
