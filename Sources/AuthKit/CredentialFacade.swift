@@ -67,6 +67,30 @@ public actor CredentialFacade {
         self.accessTokenExpiry = Date().addingTimeInterval(expiresIn)
     }
 
+    /// Stores an access-token refresh and persists refresh-token rotation.
+    public func storeRefreshed(
+        accessToken: String,
+        expiresIn: TimeInterval,
+        refreshToken: String?
+    ) throws {
+        if let refreshToken, var current = credential {
+            current.refreshToken = refreshToken
+            current.issuedAt = Date()
+            try store.save(current)
+            credential = current
+        }
+        self.accessToken = accessToken
+        self.accessTokenExpiry = Date().addingTimeInterval(expiresIn)
+    }
+
+    /// Restores a Keychain credential into memory. The first token request must
+    /// refresh because access tokens are deliberately not persisted.
+    public func restoreOffline(_ credential: OfflineCredential) {
+        self.credential = credential
+        accessToken = nil
+        accessTokenExpiry = nil
+    }
+
     /// Cierra sesión: limpia memoria + Keychain y notifica.
     public func revoke() throws {
         if let current = credential {
@@ -88,5 +112,6 @@ public actor CredentialFacade {
 
     public var currentEmail: String? { credential?.email }
     public var currentIssuer: OidcIssuer? { credential?.issuer }
+    public var currentOffline: OfflineCredential? { credential }
     public var isWorkforceSession: Bool { credential?.issuer == .sts }
 }

@@ -56,6 +56,41 @@ public struct KeychainStore: Sendable {
         return try JSONDecoder().decode(OfflineCredential.self, from: data)
     }
 
+    /// Lists stored identities without returning secret payloads.
+    public func accounts() throws -> [(issuer: OidcIssuer, email: String)] {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecMatchLimit as String: kSecMatchLimitAll,
+            kSecReturnAttributes as String: true,
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw AuthError.keychain(status: status) }
+
+        let dictionaries: [[String: Any]]
+        if let matches = item as? [[String: Any]] {
+            dictionaries = matches
+        } else if let match = item as? [String: Any] {
+            dictionaries = [match]
+        } else {
+            throw AuthError.keychain(status: errSecInternalError)
+        }
+
+        return dictionaries.compactMap { attributes in
+            guard let account = attributes[kSecAttrAccount as String] as? String else { return nil }
+            for issuer in [OidcIssuer.gaia, .sts] {
+                let prefix = issuer.rawValue + ":"
+                if account.hasPrefix(prefix) {
+                    let email = String(account.dropFirst(prefix.count))
+                    return email.isEmpty ? nil : (issuer, email)
+                }
+            }
+            return nil
+        }
+    }
+
     /// Borra la credencial; `true` si existía.
     @discardableResult
     public func delete(issuer: OidcIssuer, email: String) throws -> Bool {

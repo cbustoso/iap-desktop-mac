@@ -1,4 +1,5 @@
 import AppKit
+import AuthKit
 import ExplorerUI
 
 /// Punto de entrada AppKit (sin SwiftUI: esta máquina compila con CLT).
@@ -6,6 +7,8 @@ import ExplorerUI
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: ExplorerWindowController?
+    private var loginWindowController: LoginWindowController?
+    private let credentialFacade = CredentialFacade()
 
     static func main() {
         let app = NSApplication.shared
@@ -65,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenu(appName, [
             item("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
+            signInItem(),
             item("Settings…", #selector(ExplorerWindowController.openSettings(_:)), key: ","),
             .separator(),
             item("Hide \(appName)", #selector(NSApplication.hide(_:)), key: "h"),
@@ -127,6 +131,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.helpMenu = helpMenu.submenu
 
         app.mainMenu = mainMenu
+    }
+
+    private func signInItem() -> NSMenuItem {
+        let menuItem = item("Sign In…", #selector(showLoginWindow(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func showLoginWindow(_ sender: Any?) {
+        if loginWindowController == nil {
+            loginWindowController = LoginWindowController(
+                facade: credentialFacade,
+                clientID: ProcessInfo.processInfo.environment["GOOGLE_OAUTH_CLIENT_ID"] ?? "")
+        }
+        loginWindowController?.showWindow(sender)
+        NSApplication.shared.activate()
     }
 
     private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
