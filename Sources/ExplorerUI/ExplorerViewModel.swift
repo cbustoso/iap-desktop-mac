@@ -13,9 +13,32 @@ public final class ExplorerViewModel {
     public var showLinux: Bool = true { didSet { onChange?() } }
     public var showWindows: Bool = true { didSet { onChange?() } }
     public var selection: InstanceInfo?
+    public private(set) var isLive = false
 
     public init(projects: [ProjectInfo] = []) {
         self.projects = projects
+    }
+
+    /// Replaces the current snapshot only after a complete successful load.
+    /// On failure the existing data remains visible, preserving the mock
+    /// fallback used before credentials are wired into the app.
+    public func reloadFromGCP(
+        workspace: ProjectWorkspace, projectIDs: [String]
+    ) async {
+        let selectedID = selection?.id
+        do {
+            let loadedProjects = try await workspace.reload(projectIDs: projectIDs)
+            selection = selectedID.flatMap { id in
+                loadedProjects.lazy
+                    .flatMap(\.zones)
+                    .flatMap(\.instances)
+                    .first { $0.id == id }
+            }
+            isLive = true
+            projects = loadedProjects
+        } catch {
+            // Keep the last usable snapshot (including the initial mock data).
+        }
     }
 
     /// Proyectos con zonas/instancias ya filtradas (estructura preservada).
@@ -40,8 +63,9 @@ public final class ExplorerViewModel {
     public var instanceCount: Int { Self.instanceCount(in: projects) }
     public var visibleInstanceCount: Int { Self.instanceCount(in: filteredProjects) }
 
-    /// Texto de la status bar: "MOCK — 2 proyectos, 6 instancias (3 visibles)".
-    public func statusSummary(source: String) -> String {
+    /// Texto de la status bar: "LIVE — 2 proyectos, 6 instancias (3 visibles)".
+    public func statusSummary(source _: String) -> String {
+        let source = isLive ? "LIVE" : "MOCK"
         var text = "\(source) — \(Self.plural(projectCount, "proyecto", "proyectos")), "
             + Self.plural(instanceCount, "instancia", "instancias")
         let visible = visibleInstanceCount

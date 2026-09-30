@@ -25,7 +25,7 @@ let package = Package(
         .target(name: "SFTPKit"),
         .target(name: "RDPBridge"),
         .target(name: "SettingsStore"),
-        .target(name: "ExplorerUI"),
+        .target(name: "ExplorerUI", dependencies: ["GCPClient"]),
         .executableTarget(name: "App", dependencies: [
             "AuthKit", "GCPClient", "TunnelKit", "SSHKit",
             "TerminalUI", "SFTPKit", "RDPBridge", "SettingsStore",
