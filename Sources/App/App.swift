@@ -83,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
+        windowController?.onAddProject = { [weak self] in self?.addProjectDialog(nil) }
         wireSshConnect()
         windowController?.showWindow(nil)
         wireRefreshAction()
@@ -127,21 +128,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Auto-carga de proyectos e instancias. Deja traza del resultado y, si
     /// falla (401, IAM, red…), lo muestra en la status bar en vez de dejar el
-    /// mock en silencio.
+    /// mock en silencio. Sin permiso para listar (403), usa los proyectos
+    /// añadidos manualmente (paridad: picker Add project del original).
     private func loadLiveData(trigger: String) async {
         Self.log.info("autoload started trigger=\(trigger, privacy: .public)")
-        switch await viewModel.reloadAllFromGCP(workspace: workspace) {
-        case .success:
+        switch await viewModel.reloadAllowingStored(workspace: workspace, stored: knownProjectIDs) {
+        case .success(let discovered):
             Self.log.info("""
-                autoload loaded projects=\(self.viewModel.projectCount, privacy: .public) \
+                autoload loaded discovered=\(discovered, privacy: .public) \
+                projects=\(self.viewModel.projectCount, privacy: .public) \
                 instances=\(self.viewModel.instanceCount, privacy: .public)
                 """)
-            windowController?.statusNote = ""
+            windowController?.statusNote = discovered || knownProjectIDs.isEmpty ? "" :
+                "Sin permiso para listar proyectos (403); mostrando \(knownProjectIDs.count) añadido(s). File → Add project… para añadir más."
         case .failure(let error):
             let failure = Self.diagnose(error)
             Self.log.error("autoload failed \(failure.logCause, privacy: .public)")
             windowController?.statusNote = failure.userNote
         }
+    }
+
+    /// IDs añadidos a mano (File → Add project…), persistidos entre arranques.
+    /// Cubren cuentas sin `resourcemanager.projects.list` (403 en discovery).
+    private var knownProjectIDs: [String] {
+        get { UserDefaults.standard.stringArray(forKey: "knownProjectIDs") ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: "knownProjectIDs") }
+    }
+
+    /// Diálogo Add project (paridad con el picker del IAP original).
+    @objc private func addProjectDialog(_ sender: Any?) {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "project-id (p. ej. mi-proyecto-123)"
+        let alert = NSAlert()
+        alert.messageText = "Add project"
+        alert.informativeText = "ID del proyecto de Google Cloud (sin permiso de listado se carga directo)."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let id = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidProjectID(id) else {
+            windowController?.statusNote = "ID de proyecto inválido (minúsculas, dígitos, guiones)."
+            return
+        }
+        if !knownProjectIDs.contains(id) {
+            knownProjectIDs = knownProjectIDs + [id]
+        }
+        Task { @MainActor [weak self] in await self?.loadLiveData(trigger: "add-project") }
+    }
+
+    nonisolated static func isValidProjectID(_ id: String) -> Bool {
+        guard (6...30).contains(id.count) else { return false }
+        return id.allSatisfy { $0.isLowercase || $0.isNumber || $0 == "-" }
+            && id.first?.isLetter == true
     }
 
     /// Clasifica un error de la cadena token → Compute sin exponer su contenido.

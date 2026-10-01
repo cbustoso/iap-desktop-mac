@@ -116,6 +116,30 @@ struct ProjectWorkspaceTests {
         #expect(projects[0].zones[1].instances.map(\.status) == [.stopped])
     }
 
+    @Test func fallbackToStoredOnListForbidden() async throws {
+        // Sin permiso de listado (403) se cargan los IDs conocidos (Add project).
+        let workspace = workspace { request in
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/projects") {
+                return ExplorerStubURLProtocol.response(for: request, status: 403)
+            }
+            return ExplorerStubURLProtocol.response(for: request, json: liveResponse)
+        }
+        let (projects, discovered) = try await workspace.reloadAllowingStored(stored: ["project-a"])
+        #expect(discovered == false)
+        #expect(projects.map(\.name) == ["project-a"])
+        #expect(!projects[0].zones.isEmpty)
+    }
+
+    @Test func forbiddenListWithoutStoredRethrows() async throws {
+        let workspace = workspace { request in
+            ExplorerStubURLProtocol.response(for: request, status: 403)
+        }
+        await #expect(throws: GCPClientError.httpStatus(403)) {
+            try await workspace.reloadAllowingStored(stored: [])
+        }
+    }
+
     @Test func inaccessibleProjectReturnsEmptyEntry() async throws {
         let workspace = workspace { request in
             let components = request.url?.pathComponents ?? []

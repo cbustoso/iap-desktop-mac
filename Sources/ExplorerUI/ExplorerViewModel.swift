@@ -40,10 +40,23 @@ public final class ExplorerViewModel {
     /// (CBU-28d); ante un fallo se conserva el último snapshot (incluido el mock).
     @discardableResult
     public func reloadAllFromGCP(workspace: ProjectWorkspace) async -> Result<Void, any Error> {
+        switch await reloadAllowingStored(workspace: workspace, stored: []) {
+        case .success: return .success(())
+        case .failure(let error): return .failure(error)
+        }
+    }
+
+    /// Como `reloadAllFromGCP` pero con fallback a IDs conocidos si listar
+    /// falla con 403. Devuelve si se pudo descubrir (`true`) o se usaron los
+    /// conocidos (`false`).
+    public func reloadAllowingStored(
+        workspace: ProjectWorkspace, stored: [String]
+    ) async -> Result<Bool, any Error> {
         let selectedID = selection?.id
         do {
-            applyLoaded(try await workspace.reloadAll(), selectedID: selectedID)
-            return .success(())
+            let (loadedProjects, discovered) = try await workspace.reloadAllowingStored(stored: stored)
+            applyLoaded(loadedProjects, selectedID: selectedID)
+            return .success(discovered)
         } catch {
             return .failure(error)
         }

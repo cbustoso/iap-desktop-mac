@@ -16,6 +16,19 @@ public actor ProjectWorkspace {
         return try await reload(projectIDs: projects.map(\.projectId))
     }
 
+    /// Como `reloadAll`, pero si listar falla con 403 (la cuenta no tiene
+    /// `resourcemanager.projects.list` aunque sí acceso a proyectos
+    /// concretos), carga los IDs conocidos en vez de fallar. Devuelve si se
+    /// pudo descubrir. Cualquier otro error se propaga.
+    public func reloadAllowingStored(stored: [String]) async throws -> (projects: [ProjectInfo], discovered: Bool) {
+        do {
+            return (try await reloadAll(), true)
+        } catch GCPClientError.httpStatus(let code) where code == 403 {
+            guard !stored.isEmpty else { throw GCPClientError.httpStatus(code) }
+            return (try await reload(projectIDs: stored), false)
+        }
+    }
+
     /// Loads every configured project concurrently. GCPClient turns 403/404
     /// responses into an empty instance list, so inaccessible projects remain
     /// in the snapshot with no zones instead of failing the whole reload.

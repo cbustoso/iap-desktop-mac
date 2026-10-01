@@ -207,8 +207,12 @@ public final class ExplorerWindowController: NSWindowController {
 
     // MARK: - Acciones (toolbar y menús principales vía responder chain)
 
+    /// Acción real (la implementa quien tenga workspace+viewModel, vía
+    /// `onAddProject`); sin callback cae al stub informativo.
+    public var onAddProject: (@MainActor () -> Void)?
+
     @objc public func addProject(_ sender: Any?) {
-        showStub(title: "Add project", milestone: "M2")
+        if let onAddProject { onAddProject() } else { showStub(title: "Add project", milestone: "M2") }
     }
 
     @objc public func refreshExplorer(_ sender: Any?) {
