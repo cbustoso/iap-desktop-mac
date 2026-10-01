@@ -42,15 +42,14 @@ let package = Package(
         ]),
         .testTarget(name: "AuthKitTests", dependencies: ["AuthKit"]),
         .testTarget(name: "TunnelKitTests", dependencies: ["TunnelKit"]),
-        .testTarget(name: "SSHKitTests", dependencies: ["SSHKit"]),
-        .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
-        .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
-        .testTarget(name: "ExplorerUITests", dependencies: ["ExplorerUI"]),
         .testTarget(
             name: "SSHKitTests",
             dependencies: [
                 "SSHKit",
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ]),
+        .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
+        .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
+        .testTarget(name: "ExplorerUITests", dependencies: ["ExplorerUI"]),
     ]
 )
