@@ -20,6 +20,45 @@ public struct TokenResponse: Sendable, Codable, Equatable {
     }
 }
 
+/// Identidad offline validada de un canje: lo necesario para guardar la
+/// sesión. Redactada en cualquier representación de texto.
+public struct TokenIdentity: Sendable, Equatable, CustomStringConvertible {
+    public let email: String
+    public let idToken: String
+    public let refreshToken: String
+
+    public var description: String { "TokenIdentity(email: \(email), tokens: <redacted>)" }
+}
+
+extension TokenResponse {
+    /// Valida que el canje trae lo necesario para una sesión offline y
+    /// devuelve el email del `id_token` (paridad `GaiaOidcClient`).
+    public func identity() throws -> TokenIdentity {
+        guard let refreshToken, !refreshToken.isEmpty else { throw AuthError.missingRefreshToken }
+        guard let idToken, !idToken.isEmpty else { throw AuthError.missingIDToken }
+        guard let email = Self.email(fromIDToken: idToken) else { throw AuthError.idTokenWithoutEmail }
+        return TokenIdentity(email: email, idToken: idToken, refreshToken: refreshToken)
+    }
+
+    /// Claim `email` del payload del JWT (sin verificar firma: viene directo
+    /// de Google por TLS en el canje, como `UnverifiedGaiaJsonWebToken`).
+    static func email(fromIDToken token: String) -> String? {
+        let segments = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else { return nil }
+        var payload = String(segments[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        payload.append(String(repeating: "=", count: (4 - payload.count % 4) % 4))
+        guard
+            let data = Data(base64Encoded: payload),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let email = object["email"] as? String,
+            !email.isEmpty
+        else { return nil }
+        return email
+    }
+}
+
 extension TokenResponse: CustomStringConvertible, CustomDebugStringConvertible {
     public var description: String {
         "TokenResponse(expiresIn: \(expiresIn), scope: \(scope ?? "nil"), tokens: <redacted>)"
@@ -108,17 +147,40 @@ public struct TokenClient: Sendable {
         do {
             (data, response) = try await session.data(for: request)
         } catch {
-            throw AuthError.network(String(describing: error))
+            throw AuthError.network(Self.describe(networkError: error))
         }
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            // Mapeo fino (invalid_grant, consent_required) en T-AUTH-4 (CBU-28).
-            throw AuthError.invalidResponse
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError.malformedTokenResponse
+        }
+        guard http.statusCode == 200 else {
+            // Cuerpo OAuth estándar (RFC 6749 §5.2): {"error": …, "error_description": …}.
+            let body = try? JSONDecoder().decode(OAuthErrorBody.self, from: data)
+            throw AuthError.tokenEndpoint(
+                status: http.statusCode, error: body?.error, description: body?.errorDescription)
         }
         do {
             return try JSONDecoder().decode(TokenResponse.self, from: data)
         } catch {
-            throw AuthError.invalidResponse
+            throw AuthError.malformedTokenResponse
         }
+    }
+
+    private struct OAuthErrorBody: Decodable {
+        let error: String?
+        let errorDescription: String?
+
+        enum CodingKeys: String, CodingKey {
+            case error
+            case errorDescription = "error_description"
+        }
+    }
+
+    /// Descripción legible del fallo de transporte, sin URL ni cuerpo.
+    static func describe(networkError error: any Error) -> String {
+        if let urlError = error as? URLError {
+            return "\(urlError.localizedDescription) (URLError \(urlError.code.rawValue))"
+        }
+        return String(describing: type(of: error))
     }
 }
 

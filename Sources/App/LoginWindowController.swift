@@ -1,6 +1,7 @@
 import AppKit
 import AuthKit
 import Foundation
+import OSLog
 
 /// Programmatic AppKit login window for the Google installed-app OAuth flow.
 @MainActor
@@ -245,8 +246,15 @@ final class LoginWindowController: NSWindowController {
             return
         }
         signInButton.isEnabled = false
-        statusLabel.stringValue = "Opening Google sign-in…"
         defer { signInButton.isEnabled = true }
+        var stage = LoginStage.preparing
+        // Etapa visible + traza; nunca registra code, state, URLs ni tokens.
+        func enter(_ next: LoginStage) {
+            stage = next
+            statusLabel.stringValue = next.statusText
+            Self.log.info("login stage=\(next.rawValue, privacy: .public)")
+        }
+        enter(.preparing)
 
         do {
             var scopes = [AuthorizeURL.cloudScope]
@@ -261,6 +269,7 @@ final class LoginWindowController: NSWindowController {
                     let session = sessionFactory(window)
                     let authURL = request.url
                     let scheme = redirectURI.scheme
+                    enter(.waitingForBrowser)
                     // El code puede llegar por el callback interceptado (sesión)
                     // o por el GET directo al loopback (el navegador no
                     // interceptó y el usuario vio la página de confirmación).
@@ -296,22 +305,26 @@ final class LoginWindowController: NSWindowController {
                         continue
                     }
 
+                    enter(.validatingCallback)
                     let code = try authorize.validate(
                         callback: callback,
                         expectedState: request.state)
-                    statusLabel.stringValue = "Completing sign-in…"
+                    enter(.exchangingCode)
                     let response = try await tokenClientFactory(clientID).exchange(
                         code: code,
                         verifier: pkce.verifier,
                         redirectURI: redirectURI)
+                    enter(.verifyingIdentity)
                     let credential = try Self.offlineCredential(
                         from: response,
                         requestedScopes: scopes)
+                    enter(.savingCredentials)
                     try await facade.authorize(
                         credential,
                         accessToken: response.accessToken,
                         expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn)))
                     statusLabel.stringValue = "Signed in as \(credential.email)."
+                    Self.log.info("login succeeded")
                     close()
                     return
                 } catch {
@@ -320,12 +333,33 @@ final class LoginWindowController: NSWindowController {
                 }
             }
             throw AuthError.consentRequired
-        } catch AuthError.userCancelled {
-            statusLabel.stringValue = "Sign-in was cancelled."
-        } catch AuthError.consentRequired {
-            statusLabel.stringValue = "Google requires additional consent."
         } catch {
-            statusLabel.stringValue = "Sign-in failed. Please try again."
+            Self.logFailure(error, at: stage)
+            statusLabel.stringValue = LoginFailure.message(for: error, at: stage)
+        }
+    }
+
+    private static let log = Logger(subsystem: "com.iapdesktop.mac", category: "login")
+
+    /// Traza del fallo: estado HTTP y error OAuth públicos; los `AuthError` no
+    /// contienen secretos. De otros errores solo se registra el tipo.
+    private static func logFailure(_ error: any Error, at stage: LoginStage) {
+        switch error {
+        case AuthError.tokenEndpoint(let status, let oauthError, let description):
+            log.error("""
+                login failed stage=\(stage.rawValue, privacy: .public) http=\(status, privacy: .public) \
+                oauth_error=\(oauthError ?? "-", privacy: .public) description=\(description ?? "-", privacy: .public)
+                """)
+        case let authError as AuthError:
+            log.error("""
+                login failed stage=\(stage.rawValue, privacy: .public) \
+                error=\(String(describing: authError), privacy: .public)
+                """)
+        default:
+            log.error("""
+                login failed stage=\(stage.rawValue, privacy: .public) \
+                type=\(String(describing: type(of: error)), privacy: .public)
+                """)
         }
     }
 
@@ -338,35 +372,14 @@ final class LoginWindowController: NSWindowController {
         from response: TokenResponse,
         requestedScopes: [String]
     ) throws -> OfflineCredential {
-        guard
-            let refreshToken = response.refreshToken,
-            let idToken = response.idToken,
-            let email = email(fromIDToken: idToken)
-        else {
-            throw AuthError.invalidResponse
-        }
+        // Errores específicos: sin refresh_token / sin id_token / id_token sin email.
+        let identity = try response.identity()
         let scopes = response.scope?.split(separator: " ").map(String.init) ?? requestedScopes
         return OfflineCredential(
             issuer: .gaia,
-            email: email,
-            refreshToken: refreshToken,
-            idToken: idToken,
+            email: identity.email,
+            refreshToken: identity.refreshToken,
+            idToken: identity.idToken,
             scopes: scopes)
-    }
-
-    private static func email(fromIDToken token: String) -> String? {
-        let segments = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard segments.count == 3 else { return nil }
-        var payload = String(segments[1])
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        payload.append(String(repeating: "=", count: (4 - payload.count % 4) % 4))
-        guard
-            let data = Data(base64Encoded: payload),
-            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let email = object["email"] as? String,
-            !email.isEmpty
-        else { return nil }
-        return email
     }
 }
