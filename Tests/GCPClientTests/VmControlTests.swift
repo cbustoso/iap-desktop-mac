@@ -105,7 +105,7 @@ struct VmControlTests {
     @Test func forbiddenActionSurfacesTypedStatus() async {
         let client = vmClient { _ in (403, #"{"error":{"code":403}}"#) }
 
-        await #expect(throws: GCPClientError.httpStatus(403)) {
+        await #expect(throws: GCPClientError.apiError(status: 403, reason: nil)) {
             try await client.reset(project: "p", zone: "z", instance: "i")
         }
     }

@@ -396,7 +396,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     try await vmClient.resume(
                         project: instance.project, zone: instance.zone, instance: instance.name)
                 }
-                await loadLiveData()
+                await loadLiveData(trigger: "vmops-refresh")
             } catch {
                 presentVmControlFailure(action: action, instance: instance, error: error)
             }
@@ -408,7 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ) {
         let detail: String
         switch error {
-        case GCPClientError.httpStatus(let status):
+        case GCPClientError.apiError(let status, _):
             detail = "Google Compute respondió con HTTP \(status)."
         case GCPClientError.invalidResponse:
             detail = "Google Compute devolvió una operación inválida o agotó el tiempo de espera."
