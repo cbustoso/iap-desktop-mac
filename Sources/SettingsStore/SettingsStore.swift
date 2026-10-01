@@ -17,6 +17,7 @@ public enum SettingsError: Error, Equatable, Sendable {
 public protocol AnySetting: Sendable {
     var key: String { get }
     var isSpecified: Bool { get }
+    var isDirty: Bool { get }
     func encodedValue() throws -> Data
 }
 

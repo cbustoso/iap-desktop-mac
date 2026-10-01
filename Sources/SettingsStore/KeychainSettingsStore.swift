@@ -67,6 +67,7 @@ public struct KeychainSettingsStore: SettingsStore, Sendable {
         let query = baseQuery(key: setting.key)
         var insert = query
         insert[kSecValueData as String] = payload
+        insert[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlocked
         let addStatus = SecItemAdd(insert as CFDictionary, nil)
         if addStatus == errSecSuccess {
             return
