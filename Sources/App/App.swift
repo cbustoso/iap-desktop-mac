@@ -18,6 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Tokens reales vía fachada (con refresh automático). Al arrancar sin
     /// sesión expira al primer uso y el árbol conserva el mock (fallback).
     private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
+    private lazy var vmClient = GCPClient(tokenProvider: accessToken)
 
     /// Token OAuth de la sesión activa (refresh automático vía fachada).
     /// Compartido por Compute, OS Login y el túnel IAP; nunca se registra.
@@ -70,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.setActivationPolicy(.regular)
         windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
         wireSshConnect()
+        wireVmControl()
         windowController?.showWindow(nil)
         wireRefreshAction()
         app.activate()
@@ -253,6 +255,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         terminalTabs = tabs
         windowController.onConnectRequest = { [weak self] instance in
             self?.connect(to: instance)
+        }
+    }
+
+    private func wireVmControl() {
+        windowController?.onVmControlRequest = { [weak self] action, instance in
+            self?.control(instance, action: action)
+        }
+    }
+
+    private func control(_ instance: InstanceInfo, action: VmControlAction) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                switch action {
+                case .start:
+                    try await vmClient.start(
+                        project: instance.project, zone: instance.zone, instance: instance.name)
+                case .stop:
+                    try await vmClient.stop(
+                        project: instance.project, zone: instance.zone, instance: instance.name)
+                case .reset:
+                    try await vmClient.reset(
+                        project: instance.project, zone: instance.zone, instance: instance.name)
+                case .suspend:
+                    try await vmClient.suspend(
+                        project: instance.project, zone: instance.zone, instance: instance.name)
+                case .resume:
+                    try await vmClient.resume(
+                        project: instance.project, zone: instance.zone, instance: instance.name)
+                }
+                await loadLiveData()
+            } catch {
+                presentVmControlFailure(action: action, instance: instance, error: error)
+            }
+        }
+    }
+
+    private func presentVmControlFailure(
+        action: VmControlAction, instance: InstanceInfo, error: any Error
+    ) {
+        let detail: String
+        switch error {
+        case GCPClientError.httpStatus(let status):
+            detail = "Google Compute respondió con HTTP \(status)."
+        case GCPClientError.invalidResponse:
+            detail = "Google Compute devolvió una operación inválida o agotó el tiempo de espera."
+        default:
+            detail = "No se pudo completar la solicitud a Google Compute."
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "No se pudo ejecutar \(action.title) en \(instance.name)"
+        alert.informativeText = detail
+        alert.addButton(withTitle: "OK")
+        if let window = windowController?.window, window.isVisible {
+            alert.beginSheetModal(for: window, completionHandler: nil)
+        } else {
+            alert.runModal()
         }
     }
 
