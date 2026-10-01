@@ -1,5 +1,15 @@
 import AppKit
 
+public enum VmControlAction: String, Sendable {
+    case start
+    case stop
+    case reset
+    case suspend
+    case resume
+
+    public var title: String { rawValue.capitalized }
+}
+
 /// Ventana principal estilo IAP Desktop, todo programático (sin nibs ni SwiftUI):
 ///
 /// ```
@@ -38,6 +48,8 @@ public final class ExplorerWindowController: NSWindowController {
     /// Doble clic en una instancia. Sin handler se muestra el aviso de hito
     /// (M1/M2); la App lo conecta a SSH (SshSession + TerminalUI).
     public var onConnectRequest: (@MainActor (InstanceInfo) -> Void)?
+    /// La App ejecuta la operación GCE después de la confirmación del usuario.
+    public var onVmControlRequest: (@MainActor (VmControlAction, InstanceInfo) -> Void)?
     let propertiesPane = PropertiesView()
     let statusBar = StatusBarView()
 
@@ -291,6 +303,35 @@ public final class ExplorerWindowController: NSWindowController {
         }
     }
 
+    @objc private func performVmControl(_ sender: NSMenuItem) {
+        guard
+            let payload = sender.representedObject as? VmControlPayload,
+            onVmControlRequest != nil
+        else { return }
+        confirm(payload.action, for: payload.instance)
+    }
+
+    private func confirm(_ action: VmControlAction, for instance: InstanceInfo) {
+        let alert = NSAlert()
+        alert.alertStyle = action == .reset ? .warning : .informational
+        alert.messageText = "¿\(action.title) \(instance.name)?"
+        alert.informativeText = "La operación se ejecutará en \(instance.project) / \(instance.zone)."
+        alert.addButton(withTitle: action.title)
+        alert.addButton(withTitle: "Cancel")
+
+        let handle: @MainActor (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.onVmControlRequest?(action, instance)
+        }
+        if let window, window.isVisible {
+            alert.beginSheetModal(for: window) { response in
+                MainActor.assumeIsolated { handle(response) }
+            }
+        } else {
+            handle(alert.runModal())
+        }
+    }
+
     private func showStub(title: String, milestone: String) {
         showMessage(title: title, text: "Disponible en \(milestone)")
     }
@@ -389,6 +430,11 @@ private struct ContextPayload {
     let node: ExplorerNode
 }
 
+private struct VmControlPayload {
+    let action: VmControlAction
+    let instance: InstanceInfo
+}
+
 // MARK: - NSToolbarDelegate
 
 extension ExplorerWindowController: NSToolbarDelegate {
@@ -435,15 +481,22 @@ extension ExplorerWindowController: NSMenuDelegate {
         menu.removeAllItems()
         guard let item = outline.item(atRow: outline.clickedRow) as? OutlineItem else { return }
         for menuItem in Self.contextMenuItems(
-            for: item.node, target: self, sshConnectAvailable: onConnectRequest != nil) {
+            for: item.node, target: self, sshConnectAvailable: onConnectRequest != nil,
+            vmControlAvailable: onVmControlRequest != nil) {
             menu.addItem(menuItem)
         }
     }
 
     static func contextMenuItems(
-        for node: ExplorerNode, target: AnyObject?, sshConnectAvailable: Bool = false
+        for node: ExplorerNode, target: AnyObject?, sshConnectAvailable: Bool = false,
+        vmControlAvailable: Bool = false
     ) -> [NSMenuItem] {
-        ExplorerContextMenu.entries(for: node).map { entry in
+        var items: [NSMenuItem] = []
+        if case .instance(let instance) = node, vmControlAvailable {
+            items.append(contentsOf: vmControlItems(for: instance, target: target))
+            items.append(.separator())
+        }
+        items.append(contentsOf: ExplorerContextMenu.entries(for: node).map { entry in
             switch entry {
             case .separator:
                 return .separator()
@@ -469,6 +522,45 @@ extension ExplorerWindowController: NSMenuDelegate {
                 }
                 return item
             }
+        })
+        return items
+    }
+
+    private static func vmControlItems(
+        for instance: InstanceInfo, target: AnyObject?
+    ) -> [NSMenuItem] {
+        let actions: [VmControlAction]
+        switch instance.status {
+        case .running:
+            actions = [.stop, .reset, .suspend]
+        case .stopped:
+            // ComputeModels conserva TERMINATED y SUSPENDED como `.stopped`.
+            actions = [.start, .resume]
+        case .unknown:
+            actions = []
+        }
+        return actions.map { action in
+            let item = NSMenuItem(
+                title: action.title,
+                action: #selector(ExplorerWindowController.performVmControl(_:)),
+                keyEquivalent: "")
+            item.target = target
+            item.representedObject = VmControlPayload(action: action, instance: instance)
+            item.image = NSImage(
+                systemSymbolName: action.symbolName, accessibilityDescription: action.title)
+            item.isEnabled = true
+            return item
+        }
+    }
+}
+
+private extension VmControlAction {
+    var symbolName: String {
+        switch self {
+        case .start, .resume: return "play.fill"
+        case .stop: return "stop.fill"
+        case .reset: return "arrow.clockwise"
+        case .suspend: return "pause.fill"
         }
     }
 }
