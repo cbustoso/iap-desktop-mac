@@ -71,6 +71,7 @@ struct LoginTelemetryTests {
             .notSignedIn, .sessionRejected, .permissionDenied, .apiNotEnabled, .network("URLError -1009"),
             .server(status: 500), .unknown("DecodingError"),
             .tokenRefreshRejected(status: 400, oauthError: "invalid_request", description: "client_secret is missing."),
+            .sessionFromOtherClient, .clientNotConfigured,  // CBU-28e
         ]
         for failure in all {
             for text in [failure.logCause, failure.userNote] {
