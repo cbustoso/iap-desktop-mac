@@ -46,6 +46,22 @@ final class SessionAreaView: NSView {
         updateEmptyState()
     }
 
+    func setSessionTitle(_ title: String, identifier: String) {
+        tabView.tabViewItems.first(where: { $0.identifier as? String == identifier })?.label = title
+    }
+
+    var sessionIdentifiers: [String] {
+        tabView.tabViewItems.compactMap { $0.identifier as? String }
+    }
+
+    func tabLabel(for identifier: String) -> String? {
+        tabView.tabViewItems.first(where: { $0.identifier as? String == identifier })?.label
+    }
+
+    var selectedSessionIdentifier: String? {
+        tabView.selectedTabViewItem?.identifier as? String
+    }
+
     func closeSession(identifier: String) {
         guard let item = tabView.tabViewItems.first(where: { $0.identifier as? String == identifier })
         else { return }
@@ -106,3 +122,5 @@ final class SessionAreaView: NSView {
         tabView.tabViewType = empty ? .noTabsNoBorder : .topTabsBezelBorder
     }
 }
+
+extension SessionAreaView: SessionTabHosting {}

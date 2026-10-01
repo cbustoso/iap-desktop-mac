@@ -21,6 +21,13 @@ public final class ExplorerWindowController: NSWindowController {
     private let mainSplit = NSSplitView()
     private let centerSplit = NSSplitView()
     let sessionArea = SessionAreaView()
+
+    /// Pestañas de sesión del área central (TerminalUI acopla aquí sus terminales).
+    public var sessionTabs: any SessionTabHosting { sessionArea }
+
+    /// Doble clic en una instancia. Sin handler se muestra el aviso de hito
+    /// (M1/M2); la App lo conecta a SSH (SshSession + TerminalUI).
+    public var onConnectRequest: (@MainActor (InstanceInfo) -> Void)?
     let propertiesPane = PropertiesView()
     let statusBar = StatusBarView()
 
@@ -222,6 +229,10 @@ public final class ExplorerWindowController: NSWindowController {
     @objc private func outlineDoubleClicked() {
         guard let item = outline.item(atRow: outline.clickedRow) as? OutlineItem else { return }
         if case .instance(let instance) = item.node {
+            if let onConnectRequest {
+                onConnectRequest(instance)
+                return
+            }
             showStub(
                 title: "Connect to \(instance.name)",
                 milestone: instance.os.connectMilestone)
