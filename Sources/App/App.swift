@@ -1,5 +1,6 @@
 import AppKit
 import AuthKit
+import OSLog
 import ExplorerUI
 import GCPClient
 import SSHKit
@@ -24,13 +25,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var accessToken: @Sendable () async throws -> String = {
         let facade = self.credentialFacade
         return {
+            // Token vigente: sin refresh, sin traza.
+            if let token = try? await facade.validAccessToken() { return token }
             let store = ClientIDStore()
             let clientID = (try? store.resolve()) ?? ""
-            return try await TokenRefresher().refreshedAccessToken(
-                facade: facade,
-                client: TokenClient(clientID: clientID, clientSecret: store.clientSecret()))
+            do {
+                let token = try await TokenRefresher().refreshedAccessToken(
+                    facade: facade,
+                    client: TokenClient(clientID: clientID, clientSecret: store.clientSecret()))
+                AppDelegate.log.info("token refresh succeeded")
+                return token
+            } catch {
+                // Sin tokens ni codes: solo la causa clasificada.
+                AppDelegate.log.error("token refresh failed \(AppDelegate.diagnose(error).logCause, privacy: .public)")
+                throw error
+            }
         }
     }()
+
+    /// Traza de login, refresh y auto-carga (subsystem existente, categoría login).
+    nonisolated static let log = Logger(subsystem: "com.iapdesktop.mac", category: "login")
 
     // MARK: SSH vía IAP (CBU-44)
 
@@ -86,7 +100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             await self.restoreSession()
             self.observeSession()
-            await self.loadLiveData()
+            await self.loadLiveData(trigger: "launch")
         }
     }
 
@@ -105,14 +119,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             for await _ in await self.credentialFacade.reauthorized() {
                 if await self.credentialFacade.currentEmail != nil {
-                    await self.loadLiveData()
+                    await self.loadLiveData(trigger: "reauthorized")
                 }
             }
         }
     }
 
-    private func loadLiveData() async {
-        await viewModel.reloadAllFromGCP(workspace: workspace)
+    /// Auto-carga de proyectos e instancias. Deja traza del resultado y, si
+    /// falla (401, IAM, red…), lo muestra en la status bar en vez de dejar el
+    /// mock en silencio.
+    private func loadLiveData(trigger: String) async {
+        Self.log.info("autoload started trigger=\(trigger, privacy: .public)")
+        switch await viewModel.reloadAllFromGCP(workspace: workspace) {
+        case .success:
+            Self.log.info("""
+                autoload loaded projects=\(self.viewModel.projectCount, privacy: .public) \
+                instances=\(self.viewModel.instanceCount, privacy: .public)
+                """)
+            windowController?.statusNote = ""
+        case .failure(let error):
+            let failure = Self.diagnose(error)
+            Self.log.error("autoload failed \(failure.logCause, privacy: .public)")
+            windowController?.statusNote = failure.userNote
+        }
+    }
+
+    /// Clasifica un error de la cadena token → Compute sin exponer su contenido.
+    nonisolated static func diagnose(_ error: any Error) -> AutoLoadFailure {
+        var status: Int?
+        if case GCPClientError.httpStatus(let code) = error { status = code }
+        return AutoLoadFailure(
+            httpStatus: status,
+            urlErrorCode: (error as? URLError)?.code.rawValue,
+            authError: error as? AuthError,
+            typeName: String(describing: type(of: error)))
     }
 
     /// Solo tooling (`tools/snapshot.sh`): con `IAP_SNAPSHOT=<png>` renderiza la
@@ -340,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func refreshExplorer(_ sender: Any?) {
         Task { @MainActor [weak self] in
-            await self?.loadLiveData()
+            await self?.loadLiveData(trigger: "refresh")
         }
     }
 
