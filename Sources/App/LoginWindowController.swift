@@ -6,7 +6,7 @@ import OSLog
 /// Programmatic AppKit login window for the Google installed-app OAuth flow.
 @MainActor
 final class LoginWindowController: NSWindowController {
-    typealias TokenClientFactory = @Sendable (String) -> TokenClient
+    typealias TokenClientFactory = @Sendable (String, String?) -> TokenClient
     typealias SessionFactory = @MainActor @Sendable (NSWindow) -> LoginSession
 
     private let facade: CredentialFacade
@@ -28,7 +28,7 @@ final class LoginWindowController: NSWindowController {
     init(
         facade: CredentialFacade,
         clientID: String,
-        tokenClientFactory: @escaping TokenClientFactory = { TokenClient(clientID: $0) },
+        tokenClientFactory: @escaping TokenClientFactory = { TokenClient(clientID: $0, clientSecret: $1) },
         sessionFactory: @escaping SessionFactory = { LoginSession(window: $0) }
     ) {
         self.facade = facade
@@ -310,7 +310,7 @@ final class LoginWindowController: NSWindowController {
                         callback: callback,
                         expectedState: request.state)
                     enter(.exchangingCode)
-                    let response = try await tokenClientFactory(clientID).exchange(
+                    let response = try await tokenClientFactory(clientID, clientIDStore.clientSecret()).exchange(
                         code: code,
                         verifier: pkce.verifier,
                         redirectURI: redirectURI)

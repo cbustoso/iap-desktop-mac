@@ -25,12 +25,15 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <!--
-      OAuth client ID por defecto (CBU-45): es el client ID público del
-      propio IAP Desktop, publicado en su documentación, así el login
-      funciona sin que el usuario cree ni pegue nada. Un client ID de app
-      instalada no es secreto. No añadir nunca el client secret.
+      Credenciales OAuth embebidas (aportadas por el dueño, CBU-45): el login
+      funciona sin que el usuario cree ni pegue nada. Como toda app instalada,
+      estos valores son extraíbles del bundle: si se exponen, genera otros en
+      https://console.cloud.google.com/apis/credentials y sustitúyelos aquí.
+      No añadir client secret de otros ni commitear este fichero a repos públicos.
     -->
     <key>OAuthClientID</key>
-    <string>78381520511-4fu6ve6b49kknk3dkdnpudoi0tivq6jn.apps.googleusercontent.com</string>
+    <string>YOUR-CLIENT-ID.apps.googleusercontent.com</string>
+    <key>OAuthClientSecret</key>
+    <string>GOCSPX-PLACEHOLDER-ROTATE-ME</string>
 </dict>
 </plist>

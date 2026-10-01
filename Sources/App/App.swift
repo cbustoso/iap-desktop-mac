@@ -24,10 +24,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var accessToken: @Sendable () async throws -> String = {
         let facade = self.credentialFacade
         return {
-            let clientID = (try? ClientIDStore().resolve()) ?? ""
+            let store = ClientIDStore()
+            let clientID = (try? store.resolve()) ?? ""
             return try await TokenRefresher().refreshedAccessToken(
                 facade: facade,
-                client: TokenClient(clientID: clientID))
+                client: TokenClient(clientID: clientID, clientSecret: store.clientSecret()))
         }
     }()
 

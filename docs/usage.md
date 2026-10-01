@@ -150,15 +150,20 @@ embebido sigue aplicando a quien no haya puesto uno propio.
    (Google Auth Platform → Clients) crea un cliente OAuth de tipo
    **Desktop app**. Si el proyecto aún no tiene pantalla de consentimiento,
    configúrala antes (scopes `cloud-platform`, `openid` y `email`).
-2. Copia el **client ID** (`123456789-abc….apps.googleusercontent.com`).
-   **No** copies el client secret: no hace falta (ver abajo) y no debe ir
-   al repositorio.
-3. Sustituye el placeholder en `resources/Info.plist`:
+2. Copia el **client ID** (`123456789-abc….apps.googleusercontent.com`) y,
+   solo si tu cliente lo exige en `/token` (algunas configuraciones devuelven
+   `invalid_request: client_secret is missing`), también el **client secret**.
+3. Pon ambos en `resources/Info.plist`:
 
    ```xml
    <key>OAuthClientID</key>
    <string>123456789-abc….apps.googleusercontent.com</string>
+   <key>OAuthClientSecret</key>
+   <string>GOCSPX-…</string>
    ```
+
+   El secret viaja en `TokenClient` (canje y refresh) y nunca en logs: hay
+   tests de redacción que lo garantizan.
 
 4. Genera el bundle con `tools/make-app-bundle.sh`: el script copia ese
    `Info.plist` dentro de `dist/IAPDesktopMac.app`.
@@ -173,16 +178,19 @@ aplicaría sin saberlo a esta.
 
 El client ID de una app instalada **no es secreto** (Google lo indica así:
 el cliente no puede mantener confidencial nada embebido), por eso puede ir
-en el `Info.plist`. Un test (`shippedInfoPlistHasNoClientSecret`) impide
-añadir una clave de secreto por error.
+en el `Info.plist`. El client secret embebido **sí es extraíble del bundle**:
+solo debe ser el del dueño para su propio uso; si se expone, genera otro en
+Cloud Console y sustitúyelo (un test verifica que se resuelve y que nunca
+aparece en descripciones/logs).
 
-### PKCE sin `client_secret`
+### PKCE con `client_secret` opcional
 
 El login usa el flujo para apps instaladas con **PKCE (S256)** y redirect a
 loopback. En la [documentación de Google para apps
 instaladas](https://developers.google.com/identity/protocols/oauth2/native-app),
 `client_secret` figura como **opcional** tanto en el canje del código
-(`/token` con `code_verifier`) como en el refresh: con PKCE no se envía.
+(`/token` con `code_verifier`) como en el refresh: `TokenClient` solo lo
+envía cuando está configurado (Info.plist o `GOOGLE_OAUTH_CLIENT_SECRET`).
 
 ### Limitaciones a tener en cuenta
 

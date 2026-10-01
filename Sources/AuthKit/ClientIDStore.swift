@@ -11,7 +11,9 @@ import Foundation
 public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertible {
     public static let defaultsKey = "oauth.clientID"
     public static let infoPlistKey = "OAuthClientID"
+    public static let secretPlistKey = "OAuthClientSecret"
     public static let environmentKey = "GOOGLE_OAUTH_CLIENT_ID"
+    public static let secretEnvironmentKey = "GOOGLE_OAUTH_CLIENT_SECRET"
     /// Valor de `Info.plist` que significa "sin client ID embebido".
     public static let bundlePlaceholder = "__OAUTH_CLIENT_ID__"
     /// Dónde crear un client ID de tipo "Desktop app".
@@ -20,16 +22,20 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
 
     private let defaults: UserDefaults
     private let bundledClientID: String?
+    private let bundledClientSecret: String?
     private let environment: [String: String]
 
     public init(
         defaults: UserDefaults = .standard,
         bundledClientID: String? = Bundle.main.object(forInfoDictionaryKey: ClientIDStore.infoPlistKey)
             as? String,
+        bundledClientSecret: String? = Bundle.main.object(forInfoDictionaryKey: ClientIDStore.secretPlistKey)
+            as? String,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
         self.defaults = defaults
         self.bundledClientID = bundledClientID
+        self.bundledClientSecret = bundledClientSecret
         self.environment = environment
     }
 
@@ -71,6 +77,21 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
             return try resolve()
         }
         return try save(typed)
+    }
+
+    /// Client secret efectivo (Info.plist → entorno). Sin UserDefaults: el
+    /// secret acompaña al bundle, no se edita desde la UI. `nil` si ausente.
+    public func clientSecret() -> String? {
+        if let bundled = bundledClientSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !bundled.isEmpty {
+            return bundled
+        }
+        if let environmentValue = environment[Self.secretEnvironmentKey]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !environmentValue.isEmpty {
+            return environmentValue
+        }
+        return nil
     }
 
     /// Borra el override manual (vuelve al default embebido / entorno).

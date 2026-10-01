@@ -193,18 +193,46 @@ struct ClientIDStoreTests {
         #expect(value == ClientIDStore.bundlePlaceholder || value.hasSuffix(".apps.googleusercontent.com"))
     }
 
-    @Test func shippedInfoPlistHasNoClientSecret() throws {
-        // PKCE para apps instaladas no usa client_secret; un secreto en el
-        // repo sería una filtración (docs/usage.md §7).
+    @Test func shippedInfoPlistSecretIsDocumented() throws {
+        // El dueño aportó su client secret para que el login funcione sin
+        // setup (CBU-45). Si existe, debe resolverse vía clientSecret() y
+        // NUNCA aparecer en descripciones/logs (ver test de redacción).
         let plist = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("resources/Info.plist")
         let data = try Data(contentsOf: plist)
         let dictionary = try #require(
             try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
-        let secretKeys = dictionary.keys.filter { $0.lowercased().contains("secret") }
-        #expect(secretKeys.isEmpty, "claves sospechosas: \(secretKeys)")
-        #expect(!String(decoding: data, as: UTF8.self).contains("GOCSPX-"))  // prefijo de secretos de Google
+        if let secret = dictionary[ClientIDStore.secretPlistKey] as? String {
+            let store = ClientIDStore(
+                bundledClientID: nil, bundledClientSecret: secret, environment: [:])
+            #expect(store.clientSecret() == secret)
+            #expect(!store.description.contains(secret))
+            #expect(!store.debugDescription.contains(secret))
+        }
+    }
+
+    @Test func clientSecretResolvesFromBundleThenEnvironment() throws {
+        try withDefaults { defaults in
+            let fromBundle = ClientIDStore(
+                defaults: defaults,
+                bundledClientID: nil,
+                bundledClientSecret: "  bundled-secret  ",
+                environment: [ClientIDStore.secretEnvironmentKey: "env-secret"])
+            #expect(fromBundle.clientSecret() == "bundled-secret")
+            let fromEnv = ClientIDStore(
+                defaults: defaults,
+                bundledClientID: nil,
+                bundledClientSecret: "   ",
+                environment: [ClientIDStore.secretEnvironmentKey: "env-secret"])
+            #expect(fromEnv.clientSecret() == "env-secret")
+            let missing = ClientIDStore(
+                defaults: defaults,
+                bundledClientID: nil,
+                bundledClientSecret: nil,
+                environment: [:])
+            #expect(missing.clientSecret() == nil)
+        }
     }
 
     private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
