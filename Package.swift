@@ -75,6 +75,7 @@ let package = Package(
             ]),
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
         .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
+        .testTarget(name: "RDPBridgeTests", dependencies: ["RDPBridge"]),
         .testTarget(name: "ExplorerUITests", dependencies: ["ExplorerUI"]),
         .testTarget(
             name: "TerminalUITests",
