@@ -3,11 +3,52 @@ import ExplorerUI
 import GCPClient
 import OSLog
 import RDPBridge
+import SettingsStore
 import TunnelKit
 
 // CBU-52: RDP de extremo a extremo por la vía fallback (ADR-0003 §2):
 // túnel IAP → .rdp → "Windows App". Solo cableado; la lógica vive en
 // RDPBridge (conector) y GCPClient (reset de credenciales).
+// CBU-54: la credencial generada se guarda en Keychain (ámbito instancia,
+// mismas claves que el panel Settings) y se puede regenerar.
+
+/// Credenciales Windows por instancia en los stores del panel Settings:
+/// `RdpPassword` en Keychain (`KeychainSettingsStore`) y `RdpUsername`
+/// (no secreto) en el store normal de la instancia. La contraseña nunca va a
+/// UserDefaults, disco plano ni logs.
+struct KeychainWindowsCredentialVault: WindowsCredentialVault {
+    static let usernameKey = "RdpUsername"
+    static let passwordKey = "RdpPassword"
+
+    /// Mismo esquema que `ApplicationSettingsDataSource.store(for:isSensitive:)`.
+    static func component(for instance: InstanceInfo) -> String {
+        SettingsScope.instance(project: instance.project, zone: instance.zone, instance: instance.name)
+            .persistencePath.replacingOccurrences(of: "/", with: ".")
+    }
+
+    var secureStore: @Sendable (InstanceInfo) -> any SettingsStore = {
+        KeychainSettingsStore(service: "com.iapdesktop.mac.settings.secure.\(component(for: $0))")
+    }
+    var plainStore: @Sendable (InstanceInfo) -> any SettingsStore = {
+        UserDefaultsSettingsStore(suiteName: "com.iapdesktop.mac.settings.\(component(for: $0))")
+    }
+
+    func load(for instance: InstanceInfo) throws -> WindowsLogonCredential? {
+        let password: Setting<String> = try secureStore(instance).read(key: Self.passwordKey, defaultValue: "")
+        guard password.isSpecified else { return nil }
+        let username: Setting<String> = try plainStore(instance).read(key: Self.usernameKey, defaultValue: "")
+        return WindowsLogonCredential(username: username.value, password: password.value)
+    }
+
+    func save(_ credential: WindowsLogonCredential, for instance: InstanceInfo) throws {
+        var password = Setting(key: Self.passwordKey, defaultValue: "")
+        password.value = credential.password
+        try secureStore(instance).write(password)
+        var username = Setting(key: Self.usernameKey, defaultValue: "")
+        username.value = credential.username
+        try plainStore(instance).write(username)
+    }
+}
 
 /// Túnel `IapListener` hacia `remotePort` de la VM.
 final class IapRdpTunnel: RdpTunnel {
@@ -45,9 +86,13 @@ final class RdpConnectFlow {
     private let email: () async -> String?
     private let window: () -> NSWindow?
     private let note: (String) -> Void
-    /// Credenciales generadas en esta ejecución (solo memoria; nunca disco).
-    private var credentials: [RdpTarget: WindowsCredential] = [:]
+    private let credentials: WindowsCredentialCoordinator
     private var busy: Set<RdpTarget> = []
+
+    /// Instancias para las que el siguiente `connect` solo debe generar
+    /// credenciales (menú "Generate Windows credentials…"): la App solo
+    /// cablea `connect`, y App.swift queda fuera de esta tarea.
+    static var credentialsOnly: Set<String> = []
 
     init(
         client: GCPClient, tunnels: any RdpTunnelOpening,
@@ -58,15 +103,23 @@ final class RdpConnectFlow {
         self.email = email
         self.window = window
         self.note = note
+        self.credentials = WindowsCredentialCoordinator(vault: KeychainWindowsCredentialVault()) { instance, username in
+            let credential = try await client.resetWindowsCredentials(
+                project: instance.project, zone: instance.zone, instance: instance.name, username: username)
+            return WindowsLogonCredential(username: credential.username, password: credential.password)
+        }
         RdpFallbackConnector.removeGeneratedFiles()
     }
 
     func shutdown() async {
-        credentials.removeAll()
         await connector.shutdown()
     }
 
     func connect(_ instance: InstanceInfo) {
+        if Self.credentialsOnly.remove(instance.id) != nil {
+            generateCredentials(instance)
+            return
+        }
         let target = RdpTarget(project: instance.project, zone: instance.zone, instance: instance.name)
         guard !busy.contains(target) else { return }
         guard WindowsAppLauncher().applicationURL != nil else {
@@ -96,47 +149,106 @@ final class RdpConnectFlow {
         }
     }
 
+    /// Menú "Generate Windows credentials…": genera (o regenera) y guarda,
+    /// sin abrir túnel ni Windows App.
+    func generateCredentials(_ instance: InstanceInfo) {
+        let target = RdpTarget(project: instance.project, zone: instance.zone, instance: instance.name)
+        guard !busy.contains(target) else { return }
+        busy.insert(target)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.busy.remove(target) }
+            let stored = self.credentials.stored(for: instance)
+            let email = await self.email()
+            let suggested = stored?.username ?? WindowsUsername.suggest(email: email)
+            guard case .generate(let username) = self.askForCredentials(
+                instance: instance, suggested: suggested, connecting: false, replacing: stored != nil)
+            else { return }
+            do {
+                _ = try await self.generateAndShow(instance, username: username, connecting: false)
+            } catch {
+                Self.log.error("rdp credentials failed target=\(target.description, privacy: .public) \(Self.cause(error), privacy: .public)")
+                self.note("")
+                self.present(error, instance: instance)
+            }
+        }
+    }
+
     /// `nil` = cancelado; `.some(nil)` = sin usuario (Windows App lo pedirá).
     private func resolveCredential(for target: RdpTarget, instance: InstanceInfo) async throws -> String?? {
-        if let cached = credentials[target] {
-            copyToPasteboard(cached.password)
-            return .some(cached.username)
+        // Guardada en Keychain y utilizable: no se regenera (portapapeles = entrega inmediata).
+        if let stored = credentials.stored(for: instance) {
+            copyToPasteboard(stored.password)
+            note("RDP: contraseña de \(stored.username) (llavero) copiada al portapapeles")
+            return .some(stored.username)
         }
         let suggested = WindowsUsername.suggest(email: await email())
-        switch askForCredentials(instance: instance, suggested: suggested) {
+        switch askForCredentials(instance: instance, suggested: suggested, connecting: true, replacing: false) {
         case .cancel:
             return nil
         case .skip:
             return .some(nil)
         case .generate(let username):
-            note("RDP: generando credenciales Windows para \(username) en \(instance.name)…")
-            let credential = try await client.resetWindowsCredentials(
-                project: target.project, zone: target.zone, instance: target.instance, username: username)
-            Self.log.notice("rdp credentials generated target=\(target.description, privacy: .public)")
-            credentials[target] = credential
-            copyToPasteboard(credential.password)
-            showGenerated(credential, instance: instance)
+            guard let credential = try await generateAndShow(instance, username: username, connecting: true) else {
+                return nil
+            }
             return .some(credential.username)
+        }
+    }
+
+    /// Genera, guarda y muestra; "Regenerar…" repite el reset (con
+    /// confirmación) y sustituye la anterior, que deja de valer en la VM.
+    private func generateAndShow(
+        _ instance: InstanceInfo, username: String, connecting: Bool
+    ) async throws -> WindowsLogonCredential? {
+        let target = RdpTarget(project: instance.project, zone: instance.zone, instance: instance.name)
+        while true {
+            note("RDP: generando credenciales Windows para \(username) en \(instance.name)…")
+            let generated = try await credentials.generate(for: instance, username: username)
+            Self.log.notice("""
+                rdp credentials generated target=\(target.description, privacy: .public) \
+                persisted=\(generated.persisted, privacy: .public)
+                """)
+            copyToPasteboard(generated.credential.password)
+            note("")
+            switch showGenerated(generated, instance: instance, connecting: connecting) {
+            case .done:
+                return generated.credential
+            case .cancel:
+                return nil
+            case .regenerate:
+                guard confirmRegenerate(instance: instance, username: username) else {
+                    return connecting ? generated.credential : nil
+                }
+            }
         }
     }
 
     private enum CredentialChoice { case generate(String), skip, cancel }
 
-    private func askForCredentials(instance: InstanceInfo, suggested: String) -> CredentialChoice {
+    private func askForCredentials(
+        instance: InstanceInfo, suggested: String, connecting: Bool, replacing: Bool
+    ) -> CredentialChoice {
         let alert = NSAlert()
-        alert.messageText = "Conectar a \(instance.name) por RDP"
-        alert.informativeText = "¿Generar (o resetear) un usuario Windows local? La contraseña nueva "
-            + "se copiará al portapapeles para pegarla en Windows App; no se guarda en disco."
+        alert.messageText = connecting
+            ? "Conectar a \(instance.name) por RDP" : "Generar credenciales Windows para \(instance.name)"
+        let intro = replacing
+            ? "Ya hay credenciales guardadas: se resetea la contraseña y la anterior dejará de funcionar. "
+            : "¿Generar (o resetear) un usuario Windows local? "
+        let instructions = intro + "La contraseña nueva se guarda en el llavero de macOS y se copia "
+            + "al portapapeles para pegarla en Windows App."
+        alert.informativeText = instructions
         let field = NSTextField(string: suggested)
         field.placeholderString = "Usuario Windows"
         field.frame = NSRect(x: 0, y: 0, width: 240, height: 24)
         alert.accessoryView = field
-        alert.addButton(withTitle: "Generar y conectar")
-        alert.addButton(withTitle: "Conectar sin credenciales")
+        alert.addButton(withTitle: connecting ? "Generar y conectar" : "Generar")
+        if connecting { alert.addButton(withTitle: "Conectar sin credenciales") }
         alert.addButton(withTitle: "Cancelar")
         alert.window.initialFirstResponder = field
         while true {
-            switch alert.runModal() {
+            let response = alert.runModal()
+            switch response {
             case .alertFirstButtonReturn:
                 let username = field.stringValue.trimmingCharacters(in: .whitespaces)
                 guard WindowsUsername.isValidLocal(username) else {
@@ -144,7 +256,7 @@ final class RdpConnectFlow {
                     continue
                 }
                 return .generate(username)
-            case .alertSecondButtonReturn:
+            case .alertSecondButtonReturn where connecting:
                 return .skip
             default:
                 return .cancel
@@ -152,13 +264,37 @@ final class RdpConnectFlow {
         }
     }
 
-    private func showGenerated(_ credential: WindowsCredential, instance: InstanceInfo) {
+    private enum GeneratedChoice { case done, regenerate, cancel }
+
+    private func showGenerated(
+        _ generated: WindowsCredentialCoordinator.Generated, instance: InstanceInfo, connecting: Bool
+    ) -> GeneratedChoice {
         let alert = NSAlert()
         alert.messageText = "Credenciales Windows listas"
-        alert.informativeText = "Usuario: \(credential.username)\nLa contraseña está en el portapapeles "
-            + "(se borra en 90 s). Pégala cuando Windows App la pida para \(instance.name)."
-        alert.addButton(withTitle: "Abrir Windows App")
-        alert.runModal()
+        let storage = generated.persisted
+            ? "Guardada en el llavero de macOS."
+            : "No se pudo guardar en el llavero: tendrás que regenerarla la próxima vez."
+        alert.informativeText = "Usuario: \(generated.credential.username)\nLa contraseña está en el portapapeles "
+            + "(se borra en 90 s). Pégala cuando Windows App la pida para \(instance.name).\n\(storage)"
+        alert.addButton(withTitle: connecting ? "Abrir Windows App" : "OK")
+        alert.addButton(withTitle: "Regenerar…")
+        if connecting { alert.addButton(withTitle: "Cancelar") }
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .done
+        case .alertSecondButtonReturn: return .regenerate
+        default: return .cancel
+        }
+    }
+
+    private func confirmRegenerate(instance: InstanceInfo, username: String) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "¿Regenerar la contraseña de \(username)?"
+        alert.informativeText = "Se resetea en \(instance.name): la contraseña actual dejará de funcionar "
+            + "(también en sesiones abiertas que la vuelvan a pedir)."
+        alert.addButton(withTitle: "Regenerar")
+        alert.addButton(withTitle: "Cancelar")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// Portapapeles marcado como oculto/transitorio (los gestores de
@@ -242,6 +378,12 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
         outline.target = self
         outline.doubleAction = #selector(doubleClicked(_:))
         outline.menu?.delegate = self
+        // CBU-54: "Generate Windows credentials…" → mismo flujo, sin conectar.
+        (window?.windowController as? ExplorerWindowController)?.onGenerateWindowsCredentialsRequest = {
+            [onWindowsConnect] instance in
+            RdpConnectFlow.credentialsOnly.insert(instance.id)
+            onWindowsConnect(instance)
+        }
     }
 
     /// Instancia Windows de la fila `row`, si lo es.

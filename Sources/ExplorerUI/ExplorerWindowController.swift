@@ -60,6 +60,9 @@ public final class ExplorerWindowController: NSWindowController {
     public var onConnectRequest: (@MainActor (InstanceInfo) -> Void)?
     /// La App ejecuta la operación GCE después de la confirmación del usuario.
     public var onVmControlRequest: (@MainActor (VmControlAction, InstanceInfo) -> Void)?
+    /// "Generate Windows credentials…" en una instancia Windows (CBU-54): la App
+    /// resetea la contraseña vía GCE y la guarda en Keychain, sin conectar.
+    public var onGenerateWindowsCredentialsRequest: (@MainActor (InstanceInfo) -> Void)?
     /// La App aporta la persistencia; ExplorerUI solo comunica el nivel seleccionado.
     public var onOpenSettings: (@MainActor (SettingsPanelScope?) -> Void)?
     let propertiesPane = PropertiesView()
@@ -317,6 +320,10 @@ public final class ExplorerWindowController: NSWindowController {
         switch payload.command {
         case .connect where Self.isSshTarget(payload.node) && onConnectRequest != nil:
             if case .instance(let instance) = payload.node { onConnectRequest?(instance) }
+        case .generateWindowsCredentials:
+            if case .instance(let instance) = payload.node, instance.os == .windows {
+                onGenerateWindowsCredentialsRequest?(instance)
+            }
         case .connect, .connectAsUser, .connectionSettings:
             showStub(title: payload.command.title, milestone: payload.command.milestone ?? "M2")
         case .refreshProject:
@@ -507,14 +514,15 @@ extension ExplorerWindowController: NSMenuDelegate {
         guard let item = outline.item(atRow: outline.clickedRow) as? OutlineItem else { return }
         for menuItem in Self.contextMenuItems(
             for: item.node, target: self, sshConnectAvailable: onConnectRequest != nil,
-            vmControlAvailable: onVmControlRequest != nil) {
+            vmControlAvailable: onVmControlRequest != nil,
+            windowsCredentialsAvailable: onGenerateWindowsCredentialsRequest != nil) {
             menu.addItem(menuItem)
         }
     }
 
     static func contextMenuItems(
         for node: ExplorerNode, target: AnyObject?, sshConnectAvailable: Bool = false,
-        vmControlAvailable: Bool = false
+        vmControlAvailable: Bool = false, windowsCredentialsAvailable: Bool = false
     ) -> [NSMenuItem] {
         var items: [NSMenuItem] = []
         if case .instance(let instance) = node, vmControlAvailable {
@@ -538,6 +546,11 @@ extension ExplorerWindowController: NSMenuDelegate {
                 if command == .connect, sshConnectAvailable, Self.isSshTarget(node) {
                     item.isEnabled = true
                     item.toolTip = "Abrir sesión SSH vía IAP"
+                    return item
+                }
+                if command == .generateWindowsCredentials {
+                    item.isEnabled = windowsCredentialsAvailable
+                    item.toolTip = "Crear o resetear un usuario Windows y guardarlo en el llavero"
                     return item
                 }
                 item.isEnabled = command.isAvailable
