@@ -6,6 +6,7 @@
 import CryptoKit
 import Foundation
 import NIOSSH
+import IAPTestSupport
 import Testing
 @testable import SSHKit
 

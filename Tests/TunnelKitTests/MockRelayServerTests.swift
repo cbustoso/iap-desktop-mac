@@ -5,6 +5,7 @@ import NIOCore
 import NIOHTTP1
 import NIOPosix
 import NIOWebSocket
+import IAPTestSupport
 import Testing
 import WebSocketKit
 @testable import TunnelKit

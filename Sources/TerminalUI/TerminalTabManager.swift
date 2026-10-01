@@ -11,6 +11,10 @@ public final class TerminalTabManager {
     private var titles: [String: String] = [:]
     private var pendingShells: [String: Task<TerminalSessionView, any Error>] = [:]
 
+    /// Una sesión terminó (exit remoto, caída) o se cerró su pestaña: la App
+    /// libera aquí la conexión SSH de esa instancia.
+    public var onSessionEnded: (@MainActor (String) -> Void)?
+
     public init(host: any SessionTabHosting) {
         self.host = host
     }
@@ -39,6 +43,7 @@ public final class TerminalTabManager {
         let view = TerminalSessionView(backend: backend)
         view.onEnded = { [weak self] in
             self?.host.setSessionTitle("\(title) — desconectado", identifier: instanceID)
+            self?.onSessionEnded?(instanceID)
         }
         views[instanceID] = view
         titles[instanceID] = title
@@ -74,6 +79,7 @@ public final class TerminalTabManager {
         view.onEnded = nil
         host.closeSession(identifier: instanceID)
         await view.close()
+        onSessionEnded?(instanceID)
     }
 
     public func closeAll() async {

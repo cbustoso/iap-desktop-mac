@@ -2,6 +2,9 @@ import AppKit
 import AuthKit
 import ExplorerUI
 import GCPClient
+import SSHKit
+import TerminalUI
+import TunnelKit
 
 /// Punto de entrada AppKit (sin SwiftUI: esta máquina compila con CLT).
 @main
@@ -14,14 +17,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Tokens reales vía fachada (con refresh automático). Al arrancar sin
     /// sesión expira al primer uso y el árbol conserva el mock (fallback).
-    private lazy var workspace: ProjectWorkspace = {
+    private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
+
+    /// Token OAuth de la sesión activa (refresh automático vía fachada).
+    /// Compartido por Compute, OS Login y el túnel IAP; nunca se registra.
+    private lazy var accessToken: @Sendable () async throws -> String = {
         let facade = self.credentialFacade
-        return ProjectWorkspace(client: GCPClient {
+        return {
             let clientID = (try? ClientIDStore().resolve()) ?? ""
             return try await TokenRefresher().refreshedAccessToken(
                 facade: facade,
                 client: TokenClient(clientID: clientID))
-        })
+        }
+    }()
+
+    // MARK: SSH vía IAP (CBU-44)
+
+    /// Host keys aceptadas en esta ejecución (TOFU provisional hasta T-SSH-7).
+    private let knownHosts = InMemoryKnownHosts()
+    private var terminalTabs: TerminalTabManager?
+    /// Conexión SSH de cada pestaña (se cierra al terminar o cerrar la pestaña).
+    private var sshSessions: [String: SshSession] = [:]
+    private var connecting: Set<String> = []
+
+    private lazy var sshConnector: SshConnector = {
+        let facade = credentialFacade
+        let knownHosts = self.knownHosts
+        let services = GCPSshCredentialServices(
+            client: GCPClient(tokenProvider: accessToken),
+            email: { await facade.currentEmail })
+        return SshConnector(
+            accessToken: accessToken,
+            resolver: CredentialResolver(
+                osLoginStatusProvider: services,
+                osLoginAuthorizer: services,
+                metadataPublisher: services),
+            hostKeys: { knownHosts.policy(for: $0) },
+            emailHint: { await facade.currentEmail ?? "" })
     }()
 
     static func main() {
@@ -36,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
+        wireSshConnect()
         windowController?.showWindow(nil)
         wireRefreshAction()
         app.activate()
@@ -155,7 +188,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Session: conexión llega en M1 (SSH) / M2 (RDP); sin acción → deshabilitado.
         mainMenu.addItem(submenu("Session", [
-            pending("Connect", milestone: "M1"),
+            item("Connect", #selector(ExplorerWindowController.connectSelectedInstance(_:))),
             pending("Connect as user…", milestone: "M2"),
             pending("Connection settings…", milestone: "M2"),
         ]))
@@ -205,6 +238,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuItem = item("Sign Out", #selector(signOut(_:)))
         menuItem.target = self
         return menuItem
+    }
+
+    // MARK: - SSH: doble clic / Connect → pestaña con shell
+
+    private func wireSshConnect() {
+        guard let windowController else { return }
+        let tabs = TerminalTabManager(host: windowController.sessionTabs)
+        tabs.onSessionEnded = { [weak self] instanceID in
+            guard let session = self?.sshSessions.removeValue(forKey: instanceID) else { return }
+            Task { await session.close() }
+        }
+        terminalTabs = tabs
+        windowController.onConnectRequest = { [weak self] instance in
+            self?.connect(to: instance)
+        }
+    }
+
+    private func connect(to instance: InstanceInfo) {
+        guard let tabs = terminalTabs, !connecting.contains(instance.id) else { return }
+        // Pestaña viva: solo se selecciona (una por instancia).
+        if let view = tabs.view(for: instance.id), !view.hasEnded,
+           let session = sshSessions[instance.id] {
+            Task { _ = try? await tabs.openShell(instanceID: instance.id, title: instance.name, session: session) }
+            return
+        }
+        connecting.insert(instance.id)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.connecting.remove(instance.id) }
+            guard await self.credentialFacade.currentEmail != nil else {
+                self.showLoginWindow(nil)
+                return
+            }
+            let target = SshTarget(project: instance.project, zone: instance.zone, instance: instance.name)
+            do {
+                let session = try await self.sshConnector.connect(to: target)
+                self.sshSessions[instance.id] = session
+                do {
+                    _ = try await tabs.openShell(instanceID: instance.id, title: instance.name, session: session)
+                } catch {
+                    self.sshSessions[instance.id] = nil
+                    await session.close()
+                    throw error
+                }
+            } catch {
+                self.presentConnectionFailure(ConnectionFailure(error), instance: instance)
+            }
+        }
+    }
+
+    /// Error visible con enlace de ayuda (paridad `HelpTopics`); sin secretos.
+    private func presentConnectionFailure(_ failure: ConnectionFailure, instance: InstanceInfo) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "No se pudo conectar a \(instance.name)"
+        alert.informativeText = failure.message
+        alert.addButton(withTitle: "OK")
+        if let help = failure.helpTopic {
+            alert.addButton(withTitle: help.title)
+        }
+        let openHelp: @MainActor (NSApplication.ModalResponse) -> Void = { response in
+            if response == .alertSecondButtonReturn, let help = failure.helpTopic {
+                NSWorkspace.shared.open(help.url)
+            }
+        }
+        if let window = windowController?.window, window.isVisible {
+            alert.beginSheetModal(for: window) { response in
+                MainActor.assumeIsolated { openHelp(response) }
+            }
+        } else {
+            openHelp(alert.runModal())
+        }
     }
 
     @objc private func signOut(_ sender: Any?) {

@@ -58,11 +58,20 @@ public struct GCPClient: Sendable {
         }
     }
 
-    private func get<Response: Decodable>(_ url: URL) async throws -> Response {
+    func get<Response: Decodable>(_ url: URL) async throws -> Response {
+        try await send("GET", url, body: Optional<Data>.none)
+    }
+
+    /// Petición autenticada con cuerpo JSON opcional. El token nunca se registra.
+    func send<Response: Decodable>(_ method: String, _ url: URL, body: Data?) async throws -> Response {
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = method
         request.setValue("Bearer \(try await tokenProvider())", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
 
         let (data, response) = try await session.data(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {

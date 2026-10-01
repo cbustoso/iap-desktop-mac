@@ -160,3 +160,32 @@ struct ExplorerWindowSmokeTests {
         #expect(labels == ["Add project", "Refresh", "Settings"])
     }
 }
+
+// CBU-44: Connect por SSH habilitado solo para Linux cuando la App lo cablea.
+@Suite("Connect SSH (CBU-44)")
+@MainActor
+struct SshConnectMenuTests {
+    private let linux = InstanceInfo(project: "p", zone: "z", name: "web-01", os: .linux, status: .running)
+    private let windows = InstanceInfo(project: "p", zone: "z", name: "ad-01", os: .windows, status: .running)
+
+    private func connectItem(_ node: ExplorerNode, available: Bool) -> NSMenuItem? {
+        ExplorerWindowController.contextMenuItems(for: node, target: nil, sshConnectAvailable: available)
+            .first { $0.title == "Connect" }
+    }
+
+    @Test func linuxConnectEnabledWhenWired() {
+        let item = connectItem(.instance(linux), available: true)
+        #expect(item?.isEnabled == true)
+        #expect(item?.badge == nil)
+    }
+
+    @Test func windowsStaysMilestoneEvenWhenWired() {
+        let item = connectItem(.instance(windows), available: true)
+        #expect(item?.isEnabled == false)
+        #expect(item?.badge?.stringValue == "M1")
+    }
+
+    @Test func withoutHandlerConnectStaysDisabled() {
+        #expect(connectItem(.instance(linux), available: false)?.isEnabled == false)
+    }
+}

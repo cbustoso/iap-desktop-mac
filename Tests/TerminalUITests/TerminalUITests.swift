@@ -249,4 +249,22 @@ struct TerminalTabManagerTests {
         #expect(controller.sessionArea.tabLabel(for: "p/z/vm-1") == "vm-1")
         await tabs.closeAll()
     }
+
+    @Test func sessionEndedHookFiresOnRemoteEndAndOnClose() async {
+        let controller = explorer()
+        let tabs = TerminalTabManager(host: controller.sessionTabs)
+        var ended: [String] = []
+        tabs.onSessionEnded = { ended.append($0) }
+
+        let remote = FakeBackend()
+        let view = tabs.open(instanceID: "p/z/vm-1", title: "vm-1", backend: remote)
+        remote.endRemote()
+        #expect(await eventually { view.hasEnded })
+        #expect(ended == ["p/z/vm-1"])
+
+        tabs.open(instanceID: "p/z/vm-2", title: "vm-2", backend: FakeBackend())
+        await tabs.close(instanceID: "p/z/vm-2")
+        #expect(ended == ["p/z/vm-1", "p/z/vm-2"])
+        await tabs.closeAll()
+    }
 }
