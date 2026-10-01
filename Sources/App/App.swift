@@ -114,6 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.restoreSession()
+            await self.refreshAccount()
             self.observeSession()
             await self.loadLiveData(trigger: "launch")
         }
@@ -133,11 +134,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor [weak self] in
             guard let self else { return }
             for await _ in await self.credentialFacade.reauthorized() {
+                await self.refreshAccount()
                 if await self.credentialFacade.currentEmail != nil {
                     await self.loadLiveData(trigger: "reauthorized")
+                } else {
+                    // Logout: la nota hablaba de la sesión anterior.
+                    self.windowController?.statusNote = ""
                 }
             }
         }
+    }
+
+    /// Cuenta en la status bar (email completo en la UI; en logs solo dominio).
+    private func refreshAccount() async {
+        windowController?.showAccount(email: await credentialFacade.currentEmail)
     }
 
     /// Auto-carga de proyectos e instancias. Deja traza del resultado y, si

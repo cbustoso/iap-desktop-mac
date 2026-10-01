@@ -8,7 +8,9 @@ final class StatusBarView: NSView {
     // Internos (no privados) para que los tests comprueben el truncado.
     let summaryLabel = NSTextField(labelWithString: "")
     let noteLabel = NSTextField(labelWithString: "")
-    let accountLabel = NSTextField(labelWithString: "Sin sesión — cuenta pendiente (M1)")
+    /// Cuenta activa; la App la actualiza al restaurar, iniciar o cerrar sesión.
+    let accountLabel = NSTextField(labelWithString: StatusBarView.signedOutText)
+    static let signedOutText = "Sin sesión"
 
     var summary: String {
         get { summaryLabel.stringValue }
@@ -20,7 +22,13 @@ final class StatusBarView: NSView {
         set { noteLabel.stringValue = newValue }
     }
 
-    var account: String { accountLabel.stringValue }
+    var account: String {
+        get { accountLabel.stringValue }
+        set {
+            accountLabel.stringValue = newValue
+            accountLabel.toolTip = newValue
+        }
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)

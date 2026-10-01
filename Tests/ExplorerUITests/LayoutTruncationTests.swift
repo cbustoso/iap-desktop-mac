@@ -41,6 +41,8 @@ struct LayoutTruncationTests {
         let bar = StatusBarView(frame: .zero)
         bar.summary = longSummary
         bar.note = longNote
+        // Email largo: antes el texto fijo del mock ocupaba este ancho.
+        bar.account = "cristobal.bustos.long-name@example-company.com"
         return (bar, host(bar, width: width, height: StatusBarView.height))
     }
 
