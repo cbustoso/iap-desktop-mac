@@ -203,7 +203,8 @@ struct TokenClientTests {
             (HTTPURLResponse(url: request.url!, statusCode: 400, httpVersion: nil, headerFields: nil)!, Data())
         }
         let client = TokenClient(clientID: "test-client", session: session)
-        await #expect(throws: AuthError.invalidResponse) {
+        // Sin cuerpo JSON: estado HTTP sin campos OAuth (CBU-28b).
+        await #expect(throws: AuthError.tokenEndpoint(status: 400, error: nil, description: nil)) {
             try await client.refresh(refreshToken: "bad")
         }
     }
