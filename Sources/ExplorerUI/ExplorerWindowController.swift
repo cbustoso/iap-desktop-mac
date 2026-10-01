@@ -22,6 +22,16 @@ public final class ExplorerWindowController: NSWindowController {
     private let centerSplit = NSSplitView()
     let sessionArea = SessionAreaView()
 
+    /// Nota transitoria de la status bar (p. ej. por qué no cargaron los
+    /// proyectos, CBU-28d). Cadena vacía = sin nota.
+    public var statusNote: String {
+        get { statusBar.note }
+        set {
+            statusBar.note = newValue
+            statusBar.noteLabel.toolTip = newValue.isEmpty ? nil : newValue
+        }
+    }
+
     /// Pestañas de sesión del área central (TerminalUI acopla aquí sus terminales).
     public var sessionTabs: any SessionTabHosting { sessionArea }
 

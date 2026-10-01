@@ -332,7 +332,11 @@ final class LoginWindowController: NSWindowController {
                         accessToken: response.accessToken,
                         expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn)))
                     statusLabel.stringValue = "Signed in as \(credential.email)."
-                    Self.log.info("login succeeded")
+                    // Solo el dominio del email (REQ-AUTH-6), nunca la dirección completa.
+                    Self.log.info("""
+                        login succeeded domain=\(LogRedaction.emailDomain(credential.email), privacy: .public) \
+                        scopes=\(credential.scopes.count, privacy: .public)
+                        """)
                     close()
                     return
                 } catch {

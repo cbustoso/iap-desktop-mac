@@ -191,4 +191,39 @@ struct ProjectWorkspaceTests {
         #expect(viewModel.selection?.id == selected.id)
         #expect(viewModel.selection?.status == .running)
     }
+
+    // CBU-28d: el resultado de la auto-carga llega a la App (antes se perdía).
+    @Test func reloadAllReportsFailureAndKeepsSnapshot() async {
+        let workspace = workspace { request in
+            ExplorerStubURLProtocol.response(for: request, status: 401)
+        }
+        let mock = [ProjectInfo(name: "demo (MOCK)", zones: [])]
+        let viewModel = ExplorerViewModel(projects: mock)
+        let outcome = await viewModel.reloadAllFromGCP(workspace: workspace)
+        guard case .failure(let error) = outcome else {
+            Issue.record("se esperaba fallo")
+            return
+        }
+        #expect(error as? GCPClientError == .httpStatus(401))
+        #expect(viewModel.projects == mock)  // se conserva el mock
+        #expect(!viewModel.isLive)
+    }
+
+    @Test func reloadAllReportsSuccess() async {
+        let workspace = workspace { request in
+            if request.url?.host == "cloudresourcemanager.googleapis.com" {
+                return ExplorerStubURLProtocol.response(
+                    for: request, json: #"{"projects":[{"projectId":"project-a","name":"A","lifecycleState":"ACTIVE"}]}"#)
+            }
+            return ExplorerStubURLProtocol.response(for: request, json: liveResponse)
+        }
+        let viewModel = ExplorerViewModel()
+        let outcome = await viewModel.reloadAllFromGCP(workspace: workspace)
+        guard case .success = outcome else {
+            Issue.record("se esperaba éxito: \(outcome)")
+            return
+        }
+        #expect(viewModel.isLive)
+        #expect(viewModel.projectCount == 1)
+    }
 }

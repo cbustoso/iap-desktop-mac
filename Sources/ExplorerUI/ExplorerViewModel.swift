@@ -36,12 +36,16 @@ public final class ExplorerViewModel {
 
     /// Descubre todos los proyectos de la cuenta y los carga (flujo IAP:
     /// tras el login el árbol se llena solo).
-    public func reloadAllFromGCP(workspace: ProjectWorkspace) async {
+    /// Devuelve el resultado para que la App lo registre y lo muestre
+    /// (CBU-28d); ante un fallo se conserva el último snapshot (incluido el mock).
+    @discardableResult
+    public func reloadAllFromGCP(workspace: ProjectWorkspace) async -> Result<Void, any Error> {
         let selectedID = selection?.id
         do {
             applyLoaded(try await workspace.reloadAll(), selectedID: selectedID)
+            return .success(())
         } catch {
-            // Keep the last usable snapshot (including the initial mock data).
+            return .failure(error)
         }
     }
 
