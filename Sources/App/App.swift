@@ -186,9 +186,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Clasifica un error de la cadena token → Compute sin exponer su contenido.
     nonisolated static func diagnose(_ error: any Error) -> AutoLoadFailure {
         var status: Int?
-        if case GCPClientError.httpStatus(let code) = error { status = code }
+        var reason: String?
+        if case GCPClientError.apiError(let code, let apiReason) = error {
+            status = code
+            reason = apiReason
+        }
         return AutoLoadFailure(
             httpStatus: status,
+            reason: reason,
             urlErrorCode: (error as? URLError)?.code.rawValue,
             authError: error as? AuthError,
             typeName: String(describing: type(of: error)))

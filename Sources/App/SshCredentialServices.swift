@@ -53,7 +53,7 @@ struct GCPSshCredentialServices: InstanceOsLoginStatusProviding, OsLoginKeyAutho
                             username: username, publicKeyOpenSSH: publicKeyOpenSSH, email: email, expiresAt: expiresAt))
                 }
                 return AuthorizedCredential(username: username, method: .instanceMetadata)
-            } catch GCPClientError.httpStatus(403) where allowedMethods.contains(.projectMetadata) {
+            } catch GCPClientError.apiError(403, _) where allowedMethods.contains(.projectMetadata) {
                 // Sin permiso sobre la instancia: se intenta a nivel proyecto.
             }
         }
@@ -76,7 +76,7 @@ struct GCPSshCredentialServices: InstanceOsLoginStatusProviding, OsLoginKeyAutho
             do {
                 try await update()
                 return
-            } catch GCPClientError.httpStatus(412) where attempt < 3 {
+            } catch GCPClientError.apiError(412, _) where attempt < 3 {
                 continue
             }
         }

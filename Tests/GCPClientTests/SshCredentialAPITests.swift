@@ -138,7 +138,7 @@ struct SshCredentialAPITests {
 
     @Test func forbiddenSetMetadataSurfacesStatus() async {
         let gcp = client { _, _ in (403, #"{"error":{"code":403}}"#) }
-        await #expect(throws: GCPClientError.httpStatus(403)) {
+        await #expect(throws: GCPClientError.apiError(status: 403, reason: nil)) {
             try await gcp.setInstanceMetadata(project: "p", zone: "z", instance: "i", ComputeMetadata())
         }
     }

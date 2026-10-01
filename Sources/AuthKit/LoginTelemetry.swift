@@ -22,6 +22,9 @@ public enum AutoLoadFailure: Sendable, Equatable {
     case sessionRejected
     /// HTTP 403: falta el permiso IAM para listar proyectos/instancias.
     case permissionDenied
+    /// La API necesaria no está habilitada (`SERVICE_DISABLED`): p. ej.
+    /// Cloud Resource Manager apagado en el proyecto.
+    case apiNotEnabled
     /// Sin red / DNS / TLS hacia Google.
     case network(String)
     /// Otro error HTTP de la API.
@@ -35,10 +38,11 @@ public enum AutoLoadFailure: Sendable, Equatable {
 
     /// - Parameters:
     ///   - httpStatus: estado HTTP de la API de Google, si lo hubo.
+    ///   - reason: motivo de la API (`SERVICE_DISABLED`, …), si lo hubo.
     ///   - urlErrorCode: código `URLError` de un fallo de transporte.
     ///   - authError: error de AuthKit (token/refresh), si lo hubo.
     ///   - typeName: tipo del error original, para el caso desconocido.
-    public init(httpStatus: Int?, urlErrorCode: Int?, authError: AuthError?, typeName: String) {
+    public init(httpStatus: Int?, reason: String? = nil, urlErrorCode: Int?, authError: AuthError?, typeName: String) {
         if let authError {
             switch authError {
             case .tokenExpired, .userCancelled:
@@ -55,6 +59,7 @@ public enum AutoLoadFailure: Sendable, Equatable {
         } else if let httpStatus {
             switch httpStatus {
             case 401: self = .sessionRejected
+            case 403 where reason == "SERVICE_DISABLED": self = .apiNotEnabled
             case 403: self = .permissionDenied
             default: self = .server(status: httpStatus)
             }
@@ -71,6 +76,7 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .notSignedIn: return "cause=notSignedIn"
         case .sessionRejected: return "cause=unauthorized http=401"
         case .permissionDenied: return "cause=iam http=403"
+        case .apiNotEnabled: return "cause=api-disabled http=403"
         case .network(let description): return "cause=network detail=\(description)"
         case .server(let status): return "cause=http http=\(status)"
         case .tokenRefreshRejected(let status, let oauthError):
@@ -85,6 +91,7 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .notSignedIn: return "Sin sesión: inicia sesión para cargar tus proyectos."
         case .sessionRejected: return "Google rechazó la sesión (401): vuelve a iniciar sesión."
         case .permissionDenied: return "Sin permiso IAM para listar proyectos (403)."
+        case .apiNotEnabled: return "API sin habilitar (403): `gcloud services enable cloudresourcemanager.googleapis.com` o usa Add project."
         case .network: return "Sin conexión con Google: no se pudieron cargar los proyectos."
         case .server(let status): return "Google respondió \(status) al cargar los proyectos."
         case .tokenRefreshRejected(_, let oauthError):

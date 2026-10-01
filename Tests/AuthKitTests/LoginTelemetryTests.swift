@@ -40,9 +40,25 @@ struct LoginTelemetryTests {
         #expect(AutoLoadFailure(httpStatus: status, urlErrorCode: urlCode, authError: auth, typeName: "DecodingError") == expected)
     }
 
+    @Test func serviceDisabledMapsToApiNotEnabled() {
+        let failure = AutoLoadFailure(
+            httpStatus: 403, reason: "SERVICE_DISABLED",
+            urlErrorCode: nil, authError: nil, typeName: "X")
+        #expect(failure == .apiNotEnabled)
+        #expect(failure.logCause.contains("api-disabled"))
+        #expect(failure.userNote.contains("Add project"))
+    }
+
+    @Test func permissionDeniedWithoutReasonStays() {
+        let failure = AutoLoadFailure(
+            httpStatus: 403, reason: nil,
+            urlErrorCode: nil, authError: nil, typeName: "X")
+        #expect(failure == .permissionDenied)
+    }
+
     @Test func causesAndNotesNeverCarrySecrets() {
         let all: [AutoLoadFailure] = [
-            .notSignedIn, .sessionRejected, .permissionDenied, .network("URLError -1009"),
+            .notSignedIn, .sessionRejected, .permissionDenied, .apiNotEnabled, .network("URLError -1009"),
             .server(status: 500), .unknown("DecodingError"),
             .tokenRefreshRejected(status: 400, oauthError: "invalid_request"),
         ]

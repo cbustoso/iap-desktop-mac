@@ -135,7 +135,7 @@ struct ProjectWorkspaceTests {
         let workspace = workspace { request in
             ExplorerStubURLProtocol.response(for: request, status: 403)
         }
-        await #expect(throws: GCPClientError.httpStatus(403)) {
+        await #expect(throws: GCPClientError.apiError(status: 403, reason: nil)) {
             try await workspace.reloadAllowingStored(stored: [])
         }
     }
@@ -228,7 +228,7 @@ struct ProjectWorkspaceTests {
             Issue.record("se esperaba fallo")
             return
         }
-        #expect(error as? GCPClientError == .httpStatus(401))
+        #expect(error as? GCPClientError == .apiError(status: 401, reason: nil))
         #expect(viewModel.projects == mock)  // se conserva el mock
         #expect(!viewModel.isLive)
     }

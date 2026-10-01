@@ -23,8 +23,8 @@ public actor ProjectWorkspace {
     public func reloadAllowingStored(stored: [String]) async throws -> (projects: [ProjectInfo], discovered: Bool) {
         do {
             return (try await reloadAll(), true)
-        } catch GCPClientError.httpStatus(let code) where code == 403 {
-            guard !stored.isEmpty else { throw GCPClientError.httpStatus(code) }
+        } catch GCPClientError.apiError(let code, let reason) where code == 403 {
+            guard !stored.isEmpty else { throw GCPClientError.apiError(status: code, reason: reason) }
             return (try await reload(projectIDs: stored), false)
         }
     }

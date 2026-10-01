@@ -2,7 +2,10 @@ import Foundation
 
 public enum GCPClientError: Error, Equatable, Sendable {
     case invalidResponse
-    case httpStatus(Int)
+    /// Error HTTP de una API de Google. `reason` es el motivo de la API
+    /// (`details[].reason` o `status`, p. ej. `SERVICE_DISABLED`), si el
+    /// cuerpo lo traía. Permite distinguir "API sin habilitar" de "sin permiso".
+    case apiError(status: Int, reason: String?)
 }
 
 /// Minimal client for the Resource Manager and Compute APIs used by Explorer.
@@ -53,7 +56,7 @@ public struct GCPClient: Sendable {
             return (response.items ?? [:])
                 .sorted { $0.key < $1.key }
                 .flatMap { _, scopedList in scopedList.instances ?? [] }
-        } catch GCPClientError.httpStatus(let status) where status == 403 || status == 404 {
+        } catch GCPClientError.apiError(let status, _) where status == 403 || status == 404 {
             return []
         }
     }
@@ -78,8 +81,25 @@ public struct GCPClient: Sendable {
             throw GCPClientError.invalidResponse
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw GCPClientError.httpStatus(httpResponse.statusCode)
+            throw GCPClientError.apiError(
+                status: httpResponse.statusCode, reason: Self.denyReason(from: data))
         }
         return try JSONDecoder().decode(Response.self, from: data)
+    }
+
+    /// Motivo de un error de API de Google (`{"error":{"status":…,
+    /// `"details":[{"reason":…}]}}`), o `nil` si el cuerpo no lo dice.
+    static func denyReason(from data: Data) -> String? {
+        guard
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let error = json["error"] as? [String: Any]
+        else { return nil }
+        if let details = error["details"] as? [[String: Any]],
+           let reason = details.compactMap({ $0["reason"] as? String }).first,
+           !reason.isEmpty {
+            return reason
+        }
+        if let status = error["status"] as? String, !status.isEmpty { return status }
+        return nil
     }
 }

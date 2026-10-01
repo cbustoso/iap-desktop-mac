@@ -142,4 +142,26 @@ struct GCPClientTests {
         let instances = try await client(session: session).aggregatedListInstances(project: "p")
         #expect(instances.isEmpty)
     }
+
+    @Test func denyReasonReadsDetailsFirst() {
+        #expect(GCPClient.denyReason(from: Data("""
+            {"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"@type":"t","reason":"SERVICE_DISABLED"}]}}
+            """.utf8)) == "SERVICE_DISABLED")
+        #expect(GCPClient.denyReason(from: Data("""
+            {"error":{"code":403,"status":"PERMISSION_DENIED"}}
+            """.utf8)) == "PERMISSION_DENIED")
+        #expect(GCPClient.denyReason(from: Data("{}".utf8)) == nil)
+        #expect(GCPClient.denyReason(from: Data("no-json".utf8)) == nil)
+    }
+
+    @Test func forbiddenCarriesReason() async throws {
+        let session = stubbedSession { request in
+            response(for: request, status: 403, json: """
+                {"error":{"code":403,"details":[{"reason":"SERVICE_DISABLED"}]}}
+                """)
+        }
+        await #expect(throws: GCPClientError.apiError(status: 403, reason: "SERVICE_DISABLED")) {
+            try await client(session: session).listProjects()
+        }
+    }
 }
