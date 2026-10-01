@@ -12,12 +12,20 @@ public final class SshChannel: Sendable {
     public let output: AsyncStream<String>
     private let channel: any Channel
     private let exit: ExitStatusBox
+    private let link: LinkStateHub
 
-    init(channel: any Channel, output: AsyncStream<String>, exit: ExitStatusBox) {
+    init(channel: any Channel, output: AsyncStream<String>, exit: ExitStatusBox, link: LinkStateHub) {
         self.channel = channel
         self.output = output
         self.exit = exit
+        self.link = link
     }
+
+    /// Estado del enlace (CBU-42): `.reconnecting` mientras el túnel se
+    /// reanuda (el canal sigue siendo este), `.lost` si no se pudo.
+    public var linkState: SshLinkState { link.state }
+
+    public func linkStateUpdates() -> AsyncStream<SshLinkState> { link.updates() }
 
     public func write(_ data: Data) async throws {
         var buffer = channel.allocator.buffer(capacity: data.count)

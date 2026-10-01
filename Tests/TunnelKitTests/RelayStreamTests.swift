@@ -200,7 +200,7 @@ struct RelayStreamTests {
         await stream.close()
     }
 
-    @Test func reconnectGivesUpAfterTwoAttempts() async throws {
+    @Test func reconnectGivesUpAfterPolicyAttempts() async throws {
         let opener = ScriptedOpener { attempt, channel in
             if attempt == 0 { channel.serverSend(sidMessage("s")) } else { channel.serverClose(code: 1006) }
         }

@@ -24,6 +24,8 @@ public actor SshSession: CustomStringConvertible {
     private let group: MultiThreadedEventLoopGroup
     private let connection: any Channel
     private let bridge: ByteStreamBridge?
+    /// Estado del enlace compartido con los canales (CBU-42).
+    private nonisolated let link = LinkStateHub()
     private var closed = false
 
     private init(username: String, group: MultiThreadedEventLoopGroup, connection: any Channel, bridge: ByteStreamBridge?) {
@@ -59,7 +61,11 @@ public actor SshSession: CustomStringConvertible {
                 ).withConnectedSocket(sshSide).get()
                 try await awaitAuthentication(
                     connection: connection, authenticated: authenticated, firstError: firstError, timeout: timeout)
-                return SshSession(username: username, group: group, connection: connection, bridge: bridge)
+                let session = SshSession(username: username, group: group, connection: connection, bridge: bridge)
+                // Sobre túnel, el estado lo marca el relay (reanudación incluida):
+                // el cierre de la conexión SSH no debe tapar un `.lost`.
+                session.link.follow(await stream.linkStates())
+                return session
             } catch {
                 await bridge.close()
                 throw error
@@ -91,7 +97,11 @@ public actor SshSession: CustomStringConvertible {
             .connect(host: host, port: port).get()
             try await awaitAuthentication(
                 connection: connection, authenticated: authenticated, firstError: firstError, timeout: timeout)
-            return SshSession(username: username, group: group, connection: connection, bridge: nil)
+            let session = SshSession(username: username, group: group, connection: connection, bridge: nil)
+            // Por TCP no hay reanudación: el fin de la conexión es el fin del enlace.
+            let link = session.link
+            connection.closeFuture.whenComplete { _ in link.publish(.closed) }
+            return session
         } catch {
             try? await group.shutdownGracefully()
             throw error
@@ -162,7 +172,7 @@ public actor SshSession: CustomStringConvertible {
             try await channel.triggerUserOutboundEvent(SSHChannelRequestEvent.ShellRequest(wantReply: true)).get()
             try await reply.futureResult.get()
         }
-        return SshChannel(channel: child, output: output, exit: exit)
+        return SshChannel(channel: child, output: output, exit: exit, link: link)
     }
 
     /// Abre un subsistema (`sftp`, …) con bytes crudos sobre la misma conexión.
@@ -225,10 +235,18 @@ public actor SshSession: CustomStringConvertible {
 
     public var isConnected: Bool { !closed && connection.isActive }
 
+    /// Estado actual del enlace: durante `.reconnecting` la sesión sigue viva.
+    public nonisolated var linkState: SshLinkState { link.state }
+
+    /// Cambios de estado del enlace (empieza con el actual).
+    public nonisolated func linkStateUpdates() -> AsyncStream<SshLinkState> { link.updates() }
+
     /// Cierra todos los canales, la conexión SSH y el transporte.
     public func close() async {
         guard !closed else { return }
         closed = true
+        link.publish(.closed)
+        link.stop()
         try? await connection.close()
         await bridge?.close()
         try? await group.shutdownGracefully()
