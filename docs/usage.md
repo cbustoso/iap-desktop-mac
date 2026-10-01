@@ -204,3 +204,76 @@ envía cuando está configurado (Info.plist o `GOOGLE_OAUTH_CLIENT_SECRET`).
   admite los usuarios de prueba que añadas en Cloud Console. Para uso
   interno de una organización, marca la pantalla de consentimiento como
   *Internal*.
+
+### Sign Out
+
+El menú de la app (junto a *Sign In…*) tiene **Sign Out**, sin atajo de
+teclado. Al pulsarlo:
+
+1. Intenta revocar el refresh token en Google
+   (`POST https://oauth2.googleapis.com/revoke`) — best-effort, no bloquea
+   si falla.
+2. Borra la entrada de Keychain (`com.iap-mac.auth`) asociada a la cuenta,
+   solo si sigue coincidiendo con el token que se está revocando.
+3. Limpia el estado en memoria (credencial, access token) y notifica a la
+   UI para volver a mostrar la ventana de Sign In.
+
+El override manual del client ID (`UserDefaults` → `oauth.clientID`, ver
+arriba) **no se borra** al hacer Sign Out: es un ajuste de build, no de
+sesión.
+
+## 8. VM Ops: start/stop/reset/suspend/resume
+
+Las operaciones de VM están en el **menú contextual** del Explorer (clic
+derecho sobre una instancia); no hay toolbar ni atajo de teclado todavía.
+Las opciones visibles dependen del estado actual de la VM:
+
+- VM en ejecución → `Stop`, `Reset`, `Suspend`.
+- VM detenida/suspendida → `Start`, `Resume`.
+- Estado desconocido → sin opciones de control.
+
+Cada acción pide confirmación con un diálogo (`¿Stop my-vm?` /
+`¿Reset my-vm?` / etc., estilo *warning* para `Reset` por ser destructiva)
+indicando el proyecto/zona donde se ejecutará. Al confirmar, la app llama
+a la Compute API (`.../instances/{name}/{start|stop|reset|suspend|resume}`)
+y espera a que la operación de zona termine (hasta ~2 min) antes de
+refrescar el árbol. Si falla, se muestra un segundo diálogo con el motivo
+(estado HTTP/razón de la API) sin reintentar automáticamente.
+
+## 9. Añadir proyectos: autodiscover vs manual
+
+Al arrancar, la app intenta **autodiscover**: lista los proyectos
+accesibles con la cuenta activa (`resourcemanager.projects.list`) y carga
+sus instancias. Si esa llamada falla con **403 `SERVICE_DISABLED`** (la
+Cloud Resource Manager API no está habilitada en el proyecto del cliente
+OAuth), la barra de estado muestra un aviso con el enlace de activación de
+Google Cloud Console y, si ya había proyectos añadidos a mano, sigue
+mostrándolos igual. El mensaje incluye también el comando de `gcloud`
+equivalente para habilitarla:
+
+```bash
+gcloud services enable cloudresourcemanager.googleapis.com
+```
+
+Cuando el 403 es por falta de permiso de listado (no por API deshabilitada)
+la salida es **Add project** (File → *Add project…*, ⌘N, o el botón de la
+toolbar): pide un `project-id` (minúsculas/dígitos/guiones, 6–30
+caracteres) y lo añade a una lista persistida en `UserDefaults`
+(`knownProjectIDs`); esos IDs se cargan directo vía Compute, sin depender
+del listado de Resource Manager. Es la vía recomendada para cuentas de
+servicio o usuarios sin el rol de listado a nivel organización.
+
+## 10. Reconexión SSH
+
+El túnel IAP bajo una sesión SSH se reintenta solo: si la conexión
+WebSocket se corta, `TunnelKit`/`SSHKit` reconectan de forma transparente
+(`reconnect?sid&ack`, con backoff) y la sesión de shell sigue funcionando
+sin que el usuario tenga que hacer nada, hasta un número máximo de
+intentos.
+
+**Limitación actual:** si se agotan los reintentos, la sesión queda en un
+estado "perdido" (`SshLinkState.lost`) a nivel de librería, pero **todavía
+no hay un botón "Reconnect" en la UI** (`TerminalUI`/pestaña de sesión) —
+la pestaña se queda sin más tráfico y hay que cerrarla y volver a conectar
+desde el Explorer. Ver `specs/ssh/design.md` y la tarea `T-SSH-6` (sin
+completar) para el diseño previsto de la reconexión manual end-to-end.
