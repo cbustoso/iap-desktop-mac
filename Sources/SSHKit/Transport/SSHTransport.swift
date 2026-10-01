@@ -48,6 +48,7 @@ public enum SSHTransport {
     /// Conecta a `host:port` (el listener local del túnel IAP, como
     /// `SshConnection(IPEndPoint)` en el original), autentica con `privateKey`
     /// (`publickey`; ECDSA P-256/384/521 o Ed25519) y abre un shell con pty.
+    @available(*, deprecated, message: "Usa SshSession.connect(...) + openShell() (CBU-40/41)")
     public static func openShell(
         host: String,
         port: Int,
