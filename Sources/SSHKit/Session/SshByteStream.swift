@@ -13,4 +13,6 @@ public protocol SshByteStream: Sendable {
     /// Bytes recibidos en orden; termina cuando el transporte se cierra.
     func incoming() -> AsyncStream<Data>
     func close() async
+    /// Estado del enlace (CBU-42). Por defecto: siempre conectado.
+    func linkStates() async -> AsyncStream<SshLinkState>
 }
