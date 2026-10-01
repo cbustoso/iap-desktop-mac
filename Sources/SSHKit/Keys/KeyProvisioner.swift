@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import NIOSSH
 import Security
 
 /// Algorithms supported for ephemeral SSH credentials.
@@ -454,5 +455,21 @@ private struct DERReader {
         }
         offset += byteCount
         return length
+    }
+}
+
+// MARK: - Puente a NIOSSH (CBU-44)
+
+extension KeyProvisioner {
+    /// La misma llave efímera como `NIOSSHPrivateKey`, para autenticar la
+    /// sesión SSH. `internal`: la privada no sale del módulo SSHKit.
+    /// `nil` para RSA: swift-nio-ssh no soporta RSA (specs/ssh/transport-decision.md).
+    var nioSSHPrivateKey: NIOSSHPrivateKey? {
+        switch privateKey {
+        case .rsa: return nil
+        case .p256(let key): return NIOSSHPrivateKey(p256Key: key)
+        case .p384(let key): return NIOSSHPrivateKey(p384Key: key)
+        case .p521(let key): return NIOSSHPrivateKey(p521Key: key)
+        }
     }
 }

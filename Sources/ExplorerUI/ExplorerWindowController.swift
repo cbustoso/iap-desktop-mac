@@ -210,6 +210,24 @@ public final class ExplorerWindowController: NSWindowController {
     }
 
     /// Muestra u oculta el panel Properties (menú View).
+    /// Session > Connect: conecta la instancia seleccionada (si es Linux).
+    @objc public func connectSelectedInstance(_ sender: Any?) {
+        guard let instance = viewModel.selection else {
+            showMessage(title: "Connect", text: "Selecciona una instancia en Project Explorer.")
+            return
+        }
+        guard instance.os == .linux, let onConnectRequest else {
+            showStub(title: "Connect to \(instance.name)", milestone: instance.os.connectMilestone)
+            return
+        }
+        onConnectRequest(instance)
+    }
+
+    static func isSshTarget(_ node: ExplorerNode) -> Bool {
+        if case .instance(let instance) = node { return instance.os == .linux }
+        return false
+    }
+
     @objc public func toggleProperties(_ sender: Any?) {
         setPropertiesVisible(propertiesPane.isHidden)
     }
@@ -229,7 +247,7 @@ public final class ExplorerWindowController: NSWindowController {
     @objc private func outlineDoubleClicked() {
         guard let item = outline.item(atRow: outline.clickedRow) as? OutlineItem else { return }
         if case .instance(let instance) = item.node {
-            if let onConnectRequest {
+            if let onConnectRequest, instance.os == .linux {
                 onConnectRequest(instance)
                 return
             }
@@ -246,6 +264,8 @@ public final class ExplorerWindowController: NSWindowController {
     @objc private func performContextCommand(_ sender: NSMenuItem) {
         guard let payload = sender.representedObject as? ContextPayload else { return }
         switch payload.command {
+        case .connect where Self.isSshTarget(payload.node) && onConnectRequest != nil:
+            if case .instance(let instance) = payload.node { onConnectRequest?(instance) }
         case .connect, .connectAsUser, .connectionSettings:
             showStub(title: payload.command.title, milestone: payload.command.milestone ?? "M2")
         case .refreshProject:
@@ -258,9 +278,13 @@ public final class ExplorerWindowController: NSWindowController {
     }
 
     private func showStub(title: String, milestone: String) {
+        showMessage(title: title, text: "Disponible en \(milestone)")
+    }
+
+    private func showMessage(title: String, text: String) {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = "Disponible en \(milestone)"
+        alert.informativeText = text
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         if let window, window.isVisible {
@@ -396,12 +420,15 @@ extension ExplorerWindowController: NSMenuDelegate {
     public func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let item = outline.item(atRow: outline.clickedRow) as? OutlineItem else { return }
-        for menuItem in Self.contextMenuItems(for: item.node, target: self) {
+        for menuItem in Self.contextMenuItems(
+            for: item.node, target: self, sshConnectAvailable: onConnectRequest != nil) {
             menu.addItem(menuItem)
         }
     }
 
-    static func contextMenuItems(for node: ExplorerNode, target: AnyObject?) -> [NSMenuItem] {
+    static func contextMenuItems(
+        for node: ExplorerNode, target: AnyObject?, sshConnectAvailable: Bool = false
+    ) -> [NSMenuItem] {
         ExplorerContextMenu.entries(for: node).map { entry in
             switch entry {
             case .separator:
@@ -414,6 +441,13 @@ extension ExplorerWindowController: NSMenuDelegate {
                 item.target = target
                 item.representedObject = ContextPayload(command: command, node: node)
                 item.image = NSImage(systemSymbolName: command.symbolName, accessibilityDescription: nil)
+                // Connect por SSH ya existe (CBU-44) si la App lo cablea y la
+                // instancia es Linux; RDP (Windows) sigue en M2.
+                if command == .connect, sshConnectAvailable, Self.isSshTarget(node) {
+                    item.isEnabled = true
+                    item.toolTip = "Abrir sesión SSH vía IAP"
+                    return item
+                }
                 item.isEnabled = command.isAvailable
                 if let milestone = command.milestone {
                     item.badge = NSMenuItemBadge(string: milestone)

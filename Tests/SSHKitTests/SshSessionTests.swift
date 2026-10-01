@@ -5,6 +5,7 @@ import Foundation
 import NIOCore
 import NIOPosix
 import NIOSSH
+import IAPTestSupport
 import Testing
 @testable import SSHKit
 

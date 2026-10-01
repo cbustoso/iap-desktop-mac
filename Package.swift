@@ -30,6 +30,7 @@ let package = Package(
         .target(
             name: "SSHKit",
             dependencies: [
+                "TunnelKit",  // RelayStream como transporte (SshConnector, CBU-44)
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -51,11 +52,25 @@ let package = Package(
             "ExplorerUI",
         ]),
         .testTarget(name: "AuthKitTests", dependencies: ["AuthKit"]),
-        .testTarget(name: "TunnelKitTests", dependencies: ["TunnelKit"]),
+        // Mocks compartidos por varios targets de test (relay IAP + servidor SSH).
+        // Solo lo enlazan tests; nunca el producto.
+        .target(
+            name: "IAPTestSupport",
+            dependencies: [
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+            ],
+            path: "Tests/IAPTestSupport"),
+        .testTarget(name: "TunnelKitTests", dependencies: ["TunnelKit", "IAPTestSupport"]),
         .testTarget(
             name: "SSHKitTests",
             dependencies: [
                 "SSHKit",
+                "TunnelKit",
+                "IAPTestSupport",
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ]),
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),

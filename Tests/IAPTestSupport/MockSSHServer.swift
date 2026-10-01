@@ -7,29 +7,29 @@ import NIOCore
 import NIOPosix
 import NIOSSH
 
-final class MockSSHServer: Sendable {
+public final class MockSSHServer: Sendable {
     /// Lo que el cliente pidió al servidor (para aserciones).
-    struct Observed: Sendable, Equatable {
-        var ptyTerm: String?
-        var ptySize: (columns: Int, rows: Int)?
-        var shellRequested = false
-        var resizes: [Int] = []  // columnas de cada window-change
-        var subsystems: [String] = []
+    public struct Observed: Sendable, Equatable {
+        public var ptyTerm: String?
+        public var ptySize: (columns: Int, rows: Int)?
+        public var shellRequested = false
+        public var resizes: [Int] = []  // columnas de cada window-change
+        public var subsystems: [String] = []
 
-        static func == (lhs: Observed, rhs: Observed) -> Bool {
+        public static func == (lhs: Observed, rhs: Observed) -> Bool {
             lhs.ptyTerm == rhs.ptyTerm && lhs.ptySize?.columns == rhs.ptySize?.columns
                 && lhs.ptySize?.rows == rhs.ptySize?.rows && lhs.shellRequested == rhs.shellRequested
                 && lhs.resizes == rhs.resizes && lhs.subsystems == rhs.subsystems
         }
     }
 
-    let port: Int
-    let hostKey: NIOSSHPublicKey
+    public let port: Int
+    public let hostKey: NIOSSHPublicKey
     private let group: MultiThreadedEventLoopGroup
     private let channel: any Channel
     private let recorder: Recorder
 
-    var observed: Observed { recorder.value }
+    public var observed: Observed { recorder.value }
 
     private init(
         port: Int, hostKey: NIOSSHPublicKey, group: MultiThreadedEventLoopGroup,
@@ -42,10 +42,16 @@ final class MockSSHServer: Sendable {
         self.recorder = recorder
     }
 
-    static func start(username: String, authorizedKey: NIOSSHPublicKey) async throws -> MockSSHServer {
+    /// Autoriza otra llave en caliente (como publicarla en metadata / OS Login).
+    public func authorize(_ key: NIOSSHPublicKey) {
+        recorder.authorize(key)
+    }
+
+    public static func start(username: String, authorizedKey: NIOSSHPublicKey? = nil) async throws -> MockSSHServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let hostPrivateKey = NIOSSHPrivateKey(ed25519Key: Curve25519.Signing.PrivateKey())
         let recorder = Recorder()
+        if let authorizedKey { recorder.authorize(authorizedKey) }
         do {
             let channel = try await ServerBootstrap(group: group)
                 .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
@@ -53,7 +59,7 @@ final class MockSSHServer: Sendable {
                     child.eventLoop.makeCompletedFuture {
                         let configuration = SSHServerConfiguration(
                             hostKeys: [hostPrivateKey],
-                            userAuthDelegate: SingleKeyAuthDelegate(username: username, key: authorizedKey))
+                            userAuthDelegate: SingleKeyAuthDelegate(username: username, recorder: recorder))
                         try child.pipeline.syncOperations.addHandler(
                             NIOSSHHandler(
                                 role: .server(configuration),
@@ -81,7 +87,7 @@ final class MockSSHServer: Sendable {
         }
     }
 
-    func shutdown() async {
+    public func shutdown() async {
         try? await channel.close()
         try? await group.shutdownGracefully()
     }
@@ -99,16 +105,26 @@ private final class Recorder: @unchecked Sendable {
     func update(_ body: (inout MockSSHServer.Observed) -> Void) {
         lock.withLock { body(&storage) }
     }
+
+    private var authorizedKeys: [NIOSSHPublicKey] = []
+
+    func authorize(_ key: NIOSSHPublicKey) {
+        lock.withLock { authorizedKeys.append(key) }
+    }
+
+    func isAuthorized(_ key: NIOSSHPublicKey) -> Bool {
+        lock.withLock { authorizedKeys.contains(key) }
+    }
 }
 
 private final class SingleKeyAuthDelegate: NIOSSHServerUserAuthenticationDelegate {
     let supportedAuthenticationMethods: NIOSSHAvailableUserAuthenticationMethods = .publicKey
     private let username: String
-    private let key: NIOSSHPublicKey
+    private let recorder: Recorder
 
-    init(username: String, key: NIOSSHPublicKey) {
+    init(username: String, recorder: Recorder) {
         self.username = username
-        self.key = key
+        self.recorder = recorder
     }
 
     func requestReceived(
@@ -117,7 +133,7 @@ private final class SingleKeyAuthDelegate: NIOSSHServerUserAuthenticationDelegat
     ) {
         // NIOSSH ya verificó la firma; aquí solo se autoriza usuario + llave.
         guard request.username == username, case .publicKey(let offered) = request.request,
-              offered.publicKey == key
+              recorder.isAuthorized(offered.publicKey)
         else {
             responsePromise.succeed(.failure)
             return

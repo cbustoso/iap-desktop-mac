@@ -20,18 +20,18 @@ import NIOWebSocket
 /// Los close codes viajan en el **close frame WebSocket**: es lo que el cliente
 /// C# evalúa (`SshRelaySession`, `e.CloseStatus`); el mensaje `LONG_CLOSE`
 /// se ignora allí y aquí solo se envía si se pide (`sendLongClose`).
-final class MockIAPRelayServer: Sendable {
-    static let relaySubprotocol = "relay.tunnel.cloudproxy.app"
-    static let relayOrigin = "bot:iap-tunneler"
+public final class MockIAPRelayServer: Sendable {
+    public static let relaySubprotocol = "relay.tunnel.cloudproxy.app"
+    public static let relayOrigin = "bot:iap-tunneler"
 
     /// Fallo en el handshake HTTP (antes del upgrade).
-    enum HandshakeFailure: Sendable, Equatable {
+    public enum HandshakeFailure: Sendable, Equatable {
         /// 403: p. ej. proxy corporativo que bloquea WebSocket.
         case forbidden
         /// 404: backend/instancia inexistente.
         case notFound
 
-        var status: HTTPResponseStatus {
+        public var status: HTTPResponseStatus {
             switch self {
             case .forbidden: return .forbidden
             case .notFound: return .notFound
@@ -40,7 +40,7 @@ final class MockIAPRelayServer: Sendable {
     }
 
     /// Close codes del relay usados por el mock (nombres de `SshRelayCloseCode` C#).
-    enum RelayCloseCode: UInt16, Sendable, CaseIterable {
+    public enum RelayCloseCode: UInt16, Sendable, CaseIterable {
         case sidUnknown = 4001
         case notAuthorized = 4033
         case lookupFailed = 4047
@@ -48,58 +48,83 @@ final class MockIAPRelayServer: Sendable {
     }
 
     /// Cierre programado tras el upgrade.
-    struct CloseBehavior: Sendable {
-        var code: RelayCloseCode
-        var reason: String = "mock relay close"
+    public struct CloseBehavior: Sendable {
+        public var code: RelayCloseCode
+        public var reason: String
         /// Enviar antes `CONNECT_SUCCESS_SID` (cierre a mitad de sesión) o
         /// cerrar directamente (denegado en el propio connect).
-        var afterSessionID: Bool = false
+        public var afterSessionID: Bool
         /// Enviar también un mensaje `LONG_CLOSE` antes del close frame.
-        var sendLongClose: Bool = false
+        public var sendLongClose: Bool
+
+        public init(
+            code: RelayCloseCode, reason: String = "mock relay close",
+            afterSessionID: Bool = false, sendLongClose: Bool = false
+        ) {
+            self.code = code
+            self.reason = reason
+            self.afterSessionID = afterSessionID
+            self.sendLongClose = sendLongClose
+        }
     }
 
-    struct Configuration: Sendable {
-        var handshakeFailure: HandshakeFailure?
-        var close: CloseBehavior?
-        var sessionID: String = "mock-session"
-        /// ACK que devuelve `RECONNECT_SUCCESS_ACK`.
-        var reconnectAck: UInt64 = 0
+    /// Backend TCP al que el relay reenvía los DATA (como IAP hacia la VM).
+    /// Sin backend, el relay hace eco (DATA → DATA + ACK).
+    public struct Backend: Sendable, Equatable {
+        public var host: String
+        public var port: Int
 
-        init(
+        public init(host: String = "127.0.0.1", port: Int) {
+            self.host = host
+            self.port = port
+        }
+    }
+
+    public struct Configuration: Sendable {
+        public var handshakeFailure: HandshakeFailure?
+        public var close: CloseBehavior?
+        public var sessionID: String
+        /// ACK que devuelve `RECONNECT_SUCCESS_ACK`.
+        public var reconnectAck: UInt64
+        public var backend: Backend?
+
+        public init(
             handshakeFailure: HandshakeFailure? = nil,
             close: CloseBehavior? = nil,
             sessionID: String = "mock-session",
-            reconnectAck: UInt64 = 0
+            reconnectAck: UInt64 = 0,
+            backend: Backend? = nil
         ) {
             self.handshakeFailure = handshakeFailure
             self.close = close
             self.sessionID = sessionID
             self.reconnectAck = reconnectAck
+            self.backend = backend
         }
     }
 
     /// Handshake recibido (para aserciones). Nunca guarda el token: solo si
     /// venía un `Authorization: Bearer …`.
-    struct Handshake: Sendable, Equatable {
-        var path: String
-        var query: [String: String]
-        var origin: String?
-        var subprotocols: [String]
-        var hasBearerToken: Bool
-        var upgraded: Bool
+    public struct Handshake: Sendable, Equatable {
+        public var path: String
+        public var query: [String: String]
+        public var origin: String?
+        public var subprotocols: [String]
+        public var hasBearerToken: Bool
+        public var upgraded: Bool
     }
 
     /// `ws://127.0.0.1:{port}` (añadir `/v4/connect` o `/v4/reconnect?...`).
-    let baseURL: URL
-    var connectURL: URL { baseURL.appendingPathComponent("v4/connect") }
+    public let baseURL: URL
+    public var connectURL: URL { baseURL.appendingPathComponent("v4/connect") }
 
     private let group: MultiThreadedEventLoopGroup
     private let serverChannel: any Channel
     private let log: HandshakeLog
 
-    var handshakes: [Handshake] { log.entries }
+    public var handshakes: [Handshake] { log.entries }
 
-    func reconnectURL(sid: String, ack: UInt64) -> URL {
+    public func reconnectURL(sid: String, ack: UInt64) -> URL {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         components.path = "/v4/reconnect"
         components.queryItems = [URLQueryItem(name: "sid", value: sid), URLQueryItem(name: "ack", value: String(ack))]
@@ -113,7 +138,7 @@ final class MockIAPRelayServer: Sendable {
         self.log = log
     }
 
-    static func start(_ configuration: Configuration = .init()) async throws -> MockIAPRelayServer {
+    public static func start(_ configuration: Configuration = .init()) async throws -> MockIAPRelayServer {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let log = HandshakeLog()
         do {
@@ -139,7 +164,7 @@ final class MockIAPRelayServer: Sendable {
         }
     }
 
-    func shutdown() async throws {
+    public func shutdown() async throws {
         try? await serverChannel.close()
         try await group.shutdownGracefully()
     }
@@ -277,6 +302,8 @@ private final class RelayHandler: ChannelInboundHandler {
     private let configuration: MockIAPRelayServer.Configuration
     private var receivedBytes: UInt64 = 0
     private var sentClose = false
+    /// Modo backend: conexión TCP hacia el destino (p. ej. MockSSHServer).
+    private var backendChannel: (any Channel)?
 
     init(request: HTTPRequestHead, configuration: MockIAPRelayServer.Configuration) {
         self.request = request
@@ -299,6 +326,11 @@ private final class RelayHandler: ChannelInboundHandler {
         } else {
             if let close = configuration.close, !close.afterSessionID {
                 sendScheduledClose(close, context: context)
+                return
+            }
+            if let backend = configuration.backend {
+                // Como IAP: conecta al backend y solo entonces confirma el SID.
+                connectBackend(backend, context: context)
                 return
             }
             writeBinary(RelayWire.connectSuccessSid(configuration.sessionID), context: context)
@@ -338,6 +370,51 @@ private final class RelayHandler: ChannelInboundHandler {
         context.close(promise: nil)
     }
 
+    func channelInactive(context: ChannelHandlerContext) {
+        backendChannel?.close(promise: nil)
+        context.fireChannelInactive()
+    }
+
+    private func connectBackend(_ backend: MockIAPRelayServer.Backend, context: ChannelHandlerContext) {
+        let wsChannel = context.channel
+        let sessionID = configuration.sessionID
+        // El handler no es Sendable: se accede solo desde su event loop.
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+        ClientBootstrap(group: context.eventLoop)
+            .channelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(BackendToRelayHandler(relay: wsChannel))
+                }
+            }
+            .connect(host: backend.host, port: backend.port)
+            .whenComplete { result in
+                switch result {
+                case .success(let channel):
+                    handler.value.backendChannel = channel
+                    Self.send(RelayWire.connectSuccessSid(sessionID), on: wsChannel)
+                case .failure:
+                    // Destino inalcanzable: como IAP, FAILED_TO_CONNECT_TO_BACKEND.
+                    Self.close(code: 4003, reason: "backend unreachable", on: wsChannel)
+                }
+            }
+    }
+
+    static func send(_ bytes: [UInt8], on channel: any Channel) {
+        var buffer = channel.allocator.buffer(capacity: bytes.count)
+        buffer.writeBytes(bytes)
+        channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .binary, data: buffer), promise: nil)
+    }
+
+    static func close(code: UInt16, reason: String, on channel: any Channel) {
+        var buffer = channel.allocator.buffer(capacity: 2 + reason.utf8.count)
+        buffer.writeInteger(code)
+        buffer.writeString(reason)
+        channel.writeAndFlush(WebSocketFrame(fin: true, opcode: .connectionClose, data: buffer))
+            .whenComplete { _ in
+                channel.eventLoop.scheduleTask(in: .seconds(2)) { channel.close(promise: nil) }
+            }
+    }
+
     private func handleMessage(_ message: [UInt8], context: ChannelHandlerContext) {
         guard message.count >= 2 else {
             sendClose(RelayHandler.invalidTag, reason: "truncated message", context: context)
@@ -355,8 +432,16 @@ private final class RelayHandler: ChannelInboundHandler {
                 return
             }
             receivedBytes += UInt64(length)
-            writeBinary(RelayWire.data(Array(message[6...])), context: context, flush: false)
-            writeBinary(RelayWire.ack(receivedBytes), context: context)
+            if let backendChannel {
+                // Modo backend: entrega al destino y confirma lo recibido.
+                var buffer = backendChannel.allocator.buffer(capacity: length)
+                buffer.writeBytes(message[6...])
+                backendChannel.writeAndFlush(buffer, promise: nil)
+                writeBinary(RelayWire.ack(receivedBytes), context: context)
+            } else {
+                writeBinary(RelayWire.data(Array(message[6...])), context: context, flush: false)
+                writeBinary(RelayWire.ack(receivedBytes), context: context)
+            }
         case RelayWire.Tag.ack:
             // El cliente confirma lo que le enviamos; el mock no reenvía nada.
             break
@@ -465,5 +550,31 @@ private enum RelayWire {
 
     private static func uint64(_ value: UInt64) -> [UInt8] {
         (0..<8).map { UInt8(truncatingIfNeeded: value >> (8 * (7 - $0))) }
+    }
+}
+
+/// Modo backend: lo que envía el destino sale al cliente como DATA (≤ 16 KiB);
+/// si el destino cierra, el relay cierra con NORMAL (1000).
+private final class BackendToRelayHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+
+    private let relay: any Channel
+
+    init(relay: any Channel) {
+        self.relay = relay
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var buffer = unwrapInboundIn(data)
+        while buffer.readableBytes > 0 {
+            let size = min(buffer.readableBytes, RelayWire.maxArrayLength)
+            let chunk = Array(buffer.readSlice(length: size)!.readableBytesView)
+            RelayHandler.send(RelayWire.data(chunk), on: relay)
+        }
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        RelayHandler.close(code: 1000, reason: "backend closed", on: relay)
+        context.fireChannelInactive()
     }
 }
