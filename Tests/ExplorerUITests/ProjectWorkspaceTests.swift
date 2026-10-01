@@ -135,9 +135,56 @@ struct ProjectWorkspaceTests {
         let workspace = workspace { request in
             ExplorerStubURLProtocol.response(for: request, status: 403)
         }
-        await #expect(throws: GCPClientError.apiError(status: 403, reason: nil)) {
+        await #expect(throws: GoogleAPIFailure(status: 403, reason: nil)) {
             try await workspace.reloadAllowingStored(stored: [])
         }
+    }
+
+    // CBU-47b: el motivo del 403 de discovery ya no se pierde en el fallback.
+    @Test func fallbackRecordsDiscoveryFailureAndSuccessClearsIt() async throws {
+        let listing = Locked(true)  // true: projects.list responde 403
+        let workspace = workspace { request in
+            if request.url?.host == "cloudresourcemanager.googleapis.com" {
+                return listing.value
+                    ? ExplorerStubURLProtocol.response(for: request, status: 403, json: """
+                        {"error":{"code":403,"message":"Cloud Resource Manager API has not been used in project 123",\
+                        "details":[{"reason":"SERVICE_DISABLED","metadata":{"activationUrl":"https://console.developers.google.com/apis/api/cloudresourcemanager.googleapis.com/overview?project=123"}}]}}
+                        """)
+                    : ExplorerStubURLProtocol.response(
+                        for: request, json: #"{"projects":[{"projectId":"project-a","name":"A","lifecycleState":"ACTIVE"}]}"#)
+            }
+            return ExplorerStubURLProtocol.response(for: request, json: liveResponse)
+        }
+        let (_, discovered) = try await workspace.reloadAllowingStored(stored: ["project-a"])
+        #expect(discovered == false)
+        let failure = try #require(await workspace.lastDiscoveryFailure)
+        #expect(failure.cause == .serviceDisabled)
+        #expect(failure.message == "Cloud Resource Manager API has not been used in project 123")
+        let note = ProjectWorkspace.discoveryNote(for: failure, shown: 1)
+        #expect(note.contains("Cloud Resource Manager API no habilitada"))
+        #expect(note.hasSuffix("overview?project=123"))
+
+        listing.value = false
+        let (_, rediscovered) = try await workspace.reloadAllowingStored(stored: ["project-a"])
+        #expect(rediscovered)
+        #expect(await workspace.lastDiscoveryFailure == nil)
+    }
+
+    @Test func discoveryNoteDiffersByCause() {
+        func note(_ reason: String?, status: Int = 403) -> String {
+            ProjectWorkspace.discoveryNote(for: GoogleAPIFailure(status: status, reason: reason), shown: 2)
+        }
+        let notes = [
+            note("SERVICE_DISABLED"), note("ACCESS_TOKEN_SCOPE_INSUFFICIENT"),
+            note("SECURITY_POLICY_VIOLATED"), note("IAM_PERMISSION_DENIED"), note(nil, status: 500),
+        ]
+        #expect(Set(notes).count == notes.count)
+        #expect(notes.allSatisfy { $0.contains("mostrando 2 añadido(s)") })
+        #expect(notes[0].contains("APIs & Services"))  // sin activationUrl
+        #expect(notes[1].contains("cloud-platform"))
+        #expect(notes[2].contains("VPC Service Controls"))
+        #expect(notes[3].contains("403 IAM_PERMISSION_DENIED"))
+        #expect(ProjectWorkspace.discoveryNote(for: nil, shown: 1).contains("HTTP ?"))
     }
 
     @Test func inaccessibleProjectReturnsEmptyEntry() async throws {
@@ -228,7 +275,7 @@ struct ProjectWorkspaceTests {
             Issue.record("se esperaba fallo")
             return
         }
-        #expect(error as? GCPClientError == .apiError(status: 401, reason: nil))
+        #expect(error as? GoogleAPIFailure == GoogleAPIFailure(status: 401, reason: nil))
         #expect(viewModel.projects == mock)  // se conserva el mock
         #expect(!viewModel.isLive)
     }
@@ -249,5 +296,16 @@ struct ProjectWorkspaceTests {
         }
         #expect(viewModel.isLive)
         #expect(viewModel.projectCount == 1)
+    }
+}
+
+/// Valor compartido con el handler `@Sendable` del stub. `@unchecked`: bajo `lock`.
+private final class Locked<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Value
+    init(_ value: Value) { stored = value }
+    var value: Value {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
     }
 }

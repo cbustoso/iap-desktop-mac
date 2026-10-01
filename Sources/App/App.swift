@@ -151,11 +151,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 projects=\(self.viewModel.projectCount, privacy: .public) \
                 instances=\(self.viewModel.instanceCount, privacy: .public) \(BuildInfo.current, privacy: .public)
                 """)
-            windowController?.statusNote = discovered || knownProjectIDs.isEmpty ? "" :
-                "Sin permiso para listar proyectos (403); mostrando \(knownProjectIDs.count) añadido(s). File → Add project… para añadir más."
+            guard !discovered else {
+                windowController?.statusNote = ""
+                return
+            }
+            // CBU-47b: el motivo del 403 ya no se traga en el fallback.
+            let discoveryFailure = await workspace.lastDiscoveryFailure
+            Self.log.error("""
+                discovery failed \(discoveryFailure?.logDescription ?? "cause=unknown", privacy: .public) \
+                activation=\(discoveryFailure?.activationURL == nil ? "-" : "present", privacy: .public) \
+                \(BuildInfo.current, privacy: .public)
+                """)
+            windowController?.statusNote = ProjectWorkspace.discoveryNote(
+                for: discoveryFailure, shown: knownProjectIDs.count)
         case .failure(let error):
             let failure = Self.diagnose(error)
-            Self.log.error("autoload failed \(failure.logCause, privacy: .public) \(BuildInfo.current, privacy: .public)")
+            let detail = (error as? GoogleAPIFailure).map { " \($0.logDescription)" } ?? ""
+            Self.log.error("autoload failed \(failure.logCause, privacy: .public)\(detail, privacy: .public) \(BuildInfo.current, privacy: .public)")
             windowController?.statusNote = failure.userNote
         }
     }
@@ -202,6 +214,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if case GCPClientError.apiError(let code, let apiReason) = error {
             status = code
             reason = apiReason
+        } else if let failure = error as? GoogleAPIFailure {
+            status = failure.status
+            reason = failure.reason
         }
         return AutoLoadFailure(
             httpStatus: status,

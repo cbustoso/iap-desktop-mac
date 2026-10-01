@@ -160,8 +160,78 @@ struct GCPClientTests {
                 {"error":{"code":403,"details":[{"reason":"SERVICE_DISABLED"}]}}
                 """)
         }
-        await #expect(throws: GCPClientError.apiError(status: 403, reason: "SERVICE_DISABLED")) {
+        await #expect(throws: GoogleAPIFailure(status: 403, reason: "SERVICE_DISABLED")) {
             try await client(session: session).listProjects()
         }
     }
+
+    // CBU-47b: cuerpo real de Google cuando Resource Manager está apagado en
+    // el proyecto del cliente OAuth (la cuota de projects.list se le cobra a él).
+    @Test func listProjectsServiceDisabledKeepsMessageAndActivationURL() async throws {
+        let session = stubbedSession { request in
+            response(for: request, status: 403, json: serviceDisabledBody)
+        }
+        do {
+            _ = try await client(session: session).listProjects()
+            Issue.record("se esperaba GoogleAPIFailure")
+        } catch let failure as GoogleAPIFailure {
+            #expect(failure.status == 403)
+            #expect(failure.reason == "SERVICE_DISABLED")
+            #expect(failure.cause == .serviceDisabled)
+            #expect(failure.message?.hasPrefix("Cloud Resource Manager API has not been used in project 123") == true)
+            #expect(failure.activationURL?.absoluteString
+                == "https://console.developers.google.com/apis/api/cloudresourcemanager.googleapis.com/overview?project=123")
+            #expect(failure.logDescription.hasPrefix("cause=api-disabled http=403 reason=SERVICE_DISABLED message=\""))
+        }
+    }
+
+    @Test func listProjectsSendsBearerToken() async throws {
+        let session = stubbedSession { request in
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer test-token")
+            #expect(request.url?.absoluteString == "https://cloudresourcemanager.googleapis.com/v1/projects")
+            return response(for: request, json: #"{"projects":[]}"#)
+        }
+        #expect(try await client(session: session).listProjects().isEmpty)
+    }
+
+    @Test func failureCauses() {
+        func cause(_ status: Int, _ json: String) -> GoogleAPIFailure.Cause {
+            GoogleAPIFailure(status: status, body: Data(json.utf8)).cause
+        }
+        #expect(cause(403, #"{"error":{"details":[{"reason":"ACCESS_TOKEN_SCOPE_INSUFFICIENT"}]}}"#) == .scopeInsufficient)
+        #expect(cause(403, #"{"error":{"details":[{"reason":"SECURITY_POLICY_VIOLATED"}]}}"#) == .vpcServiceControls)
+        #expect(cause(403, #"{"error":{"status":"PERMISSION_DENIED"}}"#) == .permissionDenied)
+        #expect(cause(403, "no-json") == .permissionDenied)
+        #expect(cause(401, "{}") == .unauthenticated)
+        #expect(cause(500, "{}") == .other)
+    }
+
+    @Test func failureMessageIsSanitized() {
+        let failure = GoogleAPIFailure(status: 403, body: Data("""
+            {"error":{"message":"Caller ada.lovelace@example.com lacks\\npermission","details":[{"metadata":{"activationUrl":"javascript:alert(1)"}}]}}
+            """.utf8))
+        #expect(failure.message == "Caller …@example.com lacks permission")
+        #expect(failure.activationURL == nil)  // solo https
+        #expect(!failure.logDescription.contains("ada.lovelace"))
+        #expect(GoogleAPIFailure.sanitized(String(repeating: "x", count: 400))?.count == 301)
+        #expect(GoogleAPIFailure.sanitized(" \n ") == nil)
+    }
+
+    @Test func otherCallsStillThrowAPIError() async throws {
+        let session = stubbedSession { request in
+            response(for: request, status: 500, json: #"{"error":{"status":"INTERNAL","message":"boom"}}"#)
+        }
+        await #expect(throws: GCPClientError.apiError(status: 500, reason: "INTERNAL")) {
+            try await client(session: session).aggregatedListInstances(project: "p")
+        }
+    }
 }
+
+private let serviceDisabledBody = """
+    {"error":{"code":403,"message":"Cloud Resource Manager API has not been used in project 123 before or it is disabled. \
+    Enable it by visiting https://console.developers.google.com/apis/api/cloudresourcemanager.googleapis.com/overview?project=123 \
+    then retry.","status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo",\
+    "reason":"SERVICE_DISABLED","domain":"googleapis.com","metadata":{"consumer":"projects/123",\
+    "service":"cloudresourcemanager.googleapis.com",\
+    "activationUrl":"https://console.developers.google.com/apis/api/cloudresourcemanager.googleapis.com/overview?project=123"}}]}}
+    """
