@@ -257,7 +257,9 @@ final class LoginWindowController: NSWindowController {
         enter(.preparing)
 
         do {
-            var scopes = [AuthorizeURL.cloudScope]
+            // openid + email desde el primer intento: sin ellos Google no emite
+            // id_token con email y no hay identidad que guardar (CBU-46).
+            var scopes = AuthorizeURL.signInScopes
             for attempt in 0..<2 {
                 let pkce = PKCE()
                 let receiver = LoopbackReceiver()
@@ -300,7 +302,9 @@ final class LoginWindowController: NSWindowController {
                     await receiver.cancel()
 
                     if Self.callbackError(callback) == "consent_required", attempt == 0 {
-                        scopes.append(AuthorizeURL.emailScope)
+                        // Fallback conservado: un segundo intento con email
+                        // garantizado (ya incluido desde CBU-46; idempotente).
+                        if !scopes.contains(AuthorizeURL.emailScope) { scopes.append(AuthorizeURL.emailScope) }
                         statusLabel.stringValue = "Additional consent is required…"
                         continue
                     }
@@ -315,6 +319,10 @@ final class LoginWindowController: NSWindowController {
                         verifier: pkce.verifier,
                         redirectURI: redirectURI)
                     enter(.verifyingIdentity)
+                    // Consentimiento granular: el usuario pudo desmarcar Cloud.
+                    if !AuthorizeURL.missingScopes(granted: response.scope).isEmpty {
+                        throw CloudAccessNotGranted()
+                    }
                     let credential = try Self.offlineCredential(
                         from: response,
                         requestedScopes: scopes)
@@ -333,10 +341,19 @@ final class LoginWindowController: NSWindowController {
                 }
             }
             throw AuthError.consentRequired
+        } catch is CloudAccessNotGranted {
+            Self.log.error("login failed stage=\(stage.rawValue, privacy: .public) error=cloudPlatformNotGranted")
+            statusLabel.stringValue = CloudAccessNotGranted.message
         } catch {
             Self.logFailure(error, at: stage)
             statusLabel.stringValue = LoginFailure.message(for: error, at: stage)
         }
+    }
+
+    /// El usuario desmarcó el permiso de Google Cloud en el consentimiento.
+    private struct CloudAccessNotGranted: Error {
+        static let message = "Google Cloud access was not granted. Sign in again and keep the "
+            + "\"See, edit, configure and delete your Google Cloud data\" permission checked."
     }
 
     private static let log = Logger(subsystem: "com.iapdesktop.mac", category: "login")
