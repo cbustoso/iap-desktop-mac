@@ -14,11 +14,12 @@ final class MockSSHServer: Sendable {
         var ptySize: (columns: Int, rows: Int)?
         var shellRequested = false
         var resizes: [Int] = []  // columnas de cada window-change
+        var subsystems: [String] = []
 
         static func == (lhs: Observed, rhs: Observed) -> Bool {
             lhs.ptyTerm == rhs.ptyTerm && lhs.ptySize?.columns == rhs.ptySize?.columns
                 && lhs.ptySize?.rows == rhs.ptySize?.rows && lhs.shellRequested == rhs.shellRequested
-                && lhs.resizes == rhs.resizes
+                && lhs.resizes == rhs.resizes && lhs.subsystems == rhs.subsystems
         }
     }
 
@@ -125,7 +126,9 @@ private final class SingleKeyAuthDelegate: NIOSSHServerUserAuthenticationDelegat
     }
 }
 
-/// Shell falso: prompt, eco por línea y `exit` → exit-status 0 + cierre.
+/// Shell falso: prompt, eco por línea y `exit [n]` → exit-status n + cierre.
+/// `split` envía "ñ€😀" byte a byte (un paquete SSH por byte) para probar la
+/// decodificación UTF-8 en streaming. Un `subsystem` hace eco de bytes crudos.
 private final class FakeShellHandler: ChannelDuplexHandler {
     typealias InboundIn = SSHChannelData
     typealias OutboundIn = SSHChannelData
@@ -133,6 +136,7 @@ private final class FakeShellHandler: ChannelDuplexHandler {
 
     private let recorder: Recorder
     private var pending = ""
+    private var rawEcho = false
 
     init(recorder: Recorder) {
         self.recorder = recorder
@@ -152,6 +156,10 @@ private final class FakeShellHandler: ChannelDuplexHandler {
             send("mock-shell$ ", context: context)
         case let resize as SSHChannelRequestEvent.WindowChangeRequest:
             recorder.update { $0.resizes.append(resize.terminalCharacterWidth) }
+        case let subsystem as SSHChannelRequestEvent.SubsystemRequest:
+            recorder.update { $0.subsystems.append(subsystem.subsystem) }
+            rawEcho = true
+            if subsystem.wantReply { context.channel.triggerUserOutboundEvent(ChannelSuccessEvent(), promise: nil) }
         default:
             context.fireUserInboundEventTriggered(event)
         }
@@ -159,15 +167,31 @@ private final class FakeShellHandler: ChannelDuplexHandler {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         guard case .byteBuffer(let buffer) = unwrapInboundIn(data).data else { return }
+        if rawEcho {
+            context.writeAndFlush(wrapOutboundOut(SSHChannelData(type: .channel, data: .byteBuffer(buffer))), promise: nil)
+            return
+        }
         pending += String(buffer: buffer)
         while let newline = pending.firstIndex(of: "\n") {
             let line = String(pending[..<newline])
             pending = String(pending[pending.index(after: newline)...])
-            if line == "exit" {
+            if line == "exit" || line.hasPrefix("exit ") {
+                let status = Int(line.dropFirst("exit".count).trimmingCharacters(in: .whitespaces)) ?? 0
+                send("bye\r\n", context: context)
                 let channel = context.channel
-                channel.triggerUserOutboundEvent(SSHChannelRequestEvent.ExitStatus(exitStatus: 0))
+                channel.triggerUserOutboundEvent(SSHChannelRequestEvent.ExitStatus(exitStatus: status))
                     .whenComplete { _ in channel.close(promise: nil) }
                 return
+            }
+            if line == "split" {
+                for byte in Array("ñ€😀".utf8) {
+                    var one = context.channel.allocator.buffer(capacity: 1)
+                    one.writeInteger(byte)
+                    context.writeAndFlush(
+                        wrapOutboundOut(SSHChannelData(type: .channel, data: .byteBuffer(one))), promise: nil)
+                }
+                send("\r\nmock-shell$ ", context: context)
+                continue
             }
             send("echo:\(line)\r\nmock-shell$ ", context: context)
         }
