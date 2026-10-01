@@ -138,6 +138,8 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
     case connect
     case connectAsUser
     case connectionSettings
+    /// Solo instancias Windows (paridad "Generate Windows logon credentials").
+    case generateWindowsCredentials
     case refreshProject
     case properties
 
@@ -146,6 +148,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
         case .connect: return "Connect"
         case .connectAsUser: return "Connect as user…"
         case .connectionSettings: return "Connection settings…"
+        case .generateWindowsCredentials: return "Generate Windows credentials…"
         case .refreshProject: return "Refresh project"
         case .properties: return "Properties"
         }
@@ -156,6 +159,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
         case .connect: return "play.display"
         case .connectAsUser: return "person.badge.key"
         case .connectionSettings: return "slider.horizontal.3"
+        case .generateWindowsCredentials: return "key"
         case .refreshProject: return "arrow.clockwise"
         case .properties: return "info.circle"
         }
@@ -166,7 +170,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
         switch self {
         case .connect: return "M1"
         case .connectAsUser, .connectionSettings: return "M2"
-        case .refreshProject, .properties: return nil
+        case .generateWindowsCredentials, .refreshProject, .properties: return nil
         }
     }
 
@@ -181,9 +185,11 @@ public enum ContextMenuEntry: Hashable, Sendable {
 public enum ExplorerContextMenu {
     public static func entries(for node: ExplorerNode) -> [ContextMenuEntry] {
         switch node {
-        case .instance:
-            return [
-                .command(.connect), .command(.connectAsUser), .command(.connectionSettings),
+        case .instance(let instance):
+            let credentials: [ContextMenuEntry] = instance.os == .windows
+                ? [.command(.generateWindowsCredentials)] : []
+            return [.command(.connect), .command(.connectAsUser), .command(.connectionSettings)]
+                + credentials + [
                 .separator,
                 .command(.refreshProject),
                 .separator,
