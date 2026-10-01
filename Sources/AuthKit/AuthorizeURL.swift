@@ -2,13 +2,20 @@ import Foundation
 
 /// Builds and validates Google OAuth installed-app authorization requests.
 public struct AuthorizeURL: Sendable {
+    public static let openIDScope = "openid"
     public static let cloudScope = "https://www.googleapis.com/auth/cloud-platform"
     public static let emailScope = "https://www.googleapis.com/auth/userinfo.email"
+
+    /// Scopes del login (CBU-46): `openid` + `email` hacen que Google emita un
+    /// `id_token` con el claim `email`, sin el cual no hay identidad que
+    /// guardar; `cloud-platform` da acceso a las APIs (paridad
+    /// `GaiaOidcClient`: Cloud + Email en el primer login).
+    public static let signInScopes = [openIDScope, emailScope, cloudScope]
 
     public let clientID: String
     public let scopes: [String]
 
-    public init(clientID: String, scopes: [String] = [Self.cloudScope]) {
+    public init(clientID: String, scopes: [String] = Self.signInScopes) {
         self.clientID = clientID
         self.scopes = scopes
     }
@@ -72,6 +79,16 @@ public struct AuthorizeURL: Sendable {
             throw AuthError.invalidResponse
         }
         return code
+    }
+
+    /// Scopes de `required` que no aparecen en el `scope` concedido por
+    /// `/token`. Con el consentimiento granular el usuario puede desmarcar
+    /// `cloud-platform` (paridad `OAuthScopeNotGrantedException`). Sin
+    /// campo `scope` en la respuesta no se puede saber: se asume concedido.
+    public static func missingScopes(granted: String?, required: [String] = [cloudScope]) -> [String] {
+        guard let granted else { return [] }
+        let grantedSet = Set(granted.split(separator: " ").map(String.init))
+        return required.filter { !grantedSet.contains($0) }
     }
 
     private static func randomState() -> String {
