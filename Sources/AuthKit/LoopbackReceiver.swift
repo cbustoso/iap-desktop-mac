@@ -16,9 +16,12 @@ public actor LoopbackReceiver {
 
     private var listener: NWListener?
     private var port: UInt16?
+    private var redirectURI: URL?
     private var receivedCode: String?
+    private var receivedTarget: String?
     private var receivedError: AuthError?
     private var codeContinuation: CheckedContinuation<String, Error>?
+    private var callbackContinuation: CheckedContinuation<URL, Error>?
     private var timeoutTask: Task<Void, Never>?
 
     public init() {}
@@ -28,6 +31,7 @@ public actor LoopbackReceiver {
     public func start() async throws -> URL {
         await cancelListenerOnly()
         receivedCode = nil
+        receivedTarget = nil
         receivedError = nil
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: 0)
@@ -64,7 +68,9 @@ public actor LoopbackReceiver {
             listener.start(queue: .global(qos: .userInitiated))
         }
         self.port = boundPort
-        return URL(string: "http://127.0.0.1:\(boundPort)\(Self.callbackPath)")!
+        let redirectURI = URL(string: "http://127.0.0.1:\(boundPort)\(Self.callbackPath)")!
+        self.redirectURI = redirectURI
+        return redirectURI
     }
 
     /// Espera el `code` de la redirección del IdP (timeout 120 s por defecto).
@@ -81,6 +87,21 @@ public actor LoopbackReceiver {
         }
         return try await withCheckedThrowingContinuation { continuation in
             self.codeContinuation = continuation
+            self.timeoutTask = Task {
+                try? await Task.sleep(for: .seconds(timeoutSeconds))
+                self.expire()  // la Task hereda el aislamiento del actor
+            }
+        }
+    }
+
+    /// Espera la URL completa de callback (path + query del GET al loopback).
+    /// Permite validar `state` aunque la sesión del navegador no intercepte
+    /// la redirección (el usuario ve la página de confirmación y cierra).
+    /// Como `waitForCode`, devuelve lo ya recibido o falla con `?error=`.
+    public func waitForCallbackURL(timeoutSeconds: UInt64 = 120) async throws -> URL {
+        if let url = pendingCallbackURL() { return url }
+        return try await withCheckedThrowingContinuation { continuation in
+            self.callbackContinuation = continuation
             self.timeoutTask = Task {
                 try? await Task.sleep(for: .seconds(timeoutSeconds))
                 self.expire()  // la Task hereda el aislamiento del actor
@@ -105,35 +126,68 @@ public actor LoopbackReceiver {
 
     private func settle() {
         codeContinuation = nil
+        callbackContinuation = nil
         timeoutTask?.cancel()
         timeoutTask = nil
     }
 
     private func failPending(with error: Error) {
-        guard let continuation = codeContinuation else { return }
+        let code = codeContinuation
+        let callback = callbackContinuation
+        guard code != nil || callback != nil else { return }
         settle()
-        continuation.resume(throwing: error)
+        code?.resume(throwing: error)
+        callback?.resume(throwing: error)
     }
 
-    private func deliver(code: String) {
+    /// Reconstruye la URL de callback a partir del target recibido.
+    /// Consume lo almacenado (código, target y error) para no entregar
+    /// nada dos veces.
+    private func pendingCallbackURL() -> URL? {
+        guard let target = receivedTarget, let base = redirectURI,
+              let url = URL(string: target, relativeTo: base)?.absoluteURL
+        else { return nil }
+        receivedTarget = nil
+        receivedCode = nil
+        receivedError = nil
+        return url
+    }
+
+    private func deliver(code: String, target: String) {
         receivedCode = code
+        receivedTarget = target
         if let continuation = codeContinuation {
             receivedCode = nil
-            settle()
+            codeContinuation = nil
+            cancelTimeout()
             continuation.resume(returning: code)
+        }
+        if let callback = callbackContinuation, let url = pendingCallbackURL() {
+            callbackContinuation = nil
+            cancelTimeout()
+            callback.resume(returning: url)
         }
         // Single-shot: cerrar el listener tras entregar (review #14).
         Task { await self.cancelListenerOnly() }
     }
 
-    private func deliver(error: AuthError) {
+    private func deliver(error: AuthError, target: String) {
         // Solo se guarda si no hay espera que lo consuma: si no, un segundo
         // waitForCode lanzaría un error obsoleto (R3-D). start() también limpia.
-        if codeContinuation != nil {
+        receivedTarget = target
+        if codeContinuation != nil || callbackContinuation != nil {
+            receivedError = error
             failPending(with: error)
+            receivedTarget = nil
+            receivedError = nil
         } else {
             receivedError = error
         }
+    }
+
+    private func cancelTimeout() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
     }
 
     private func handle(connection: NWConnection) {
@@ -179,7 +233,7 @@ public actor LoopbackReceiver {
         // ?error=access_denied (u otro) falla al momento en vez de esperar
         // al timeout (review #9 parcial; state/CSRF llega en T-AUTH-4).
         if Self.extractError(from: targetString) != nil {
-            deliver(error: .userCancelled)
+            deliver(error: .userCancelled, target: targetString)
             send(status: "400 Bad Request", body: "Authorization denied", over: connection)
             return
         }
@@ -187,7 +241,7 @@ public actor LoopbackReceiver {
             send(status: "400 Bad Request", body: "Bad request", over: connection)
             return
         }
-        deliver(code: code)
+        deliver(code: code, target: targetString)
         send(status: "200 OK", body: "Authentication complete. You may close this window.", over: connection)
     }
 

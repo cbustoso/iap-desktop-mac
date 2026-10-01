@@ -258,9 +258,32 @@ final class LoginWindowController: NSWindowController {
                     let authorize = AuthorizeURL(clientID: clientID, scopes: scopes)
                     let request = authorize.build(redirectURI: redirectURI, pkce: pkce)
                     guard let window else { throw AuthError.userCancelled }
-                    let callback = try await sessionFactory(window).authenticate(
-                        url: request.url,
-                        callbackScheme: redirectURI.scheme)
+                    let session = sessionFactory(window)
+                    let authURL = request.url
+                    let scheme = redirectURI.scheme
+                    // El code puede llegar por el callback interceptado (sesión)
+                    // o por el GET directo al loopback (el navegador no
+                    // interceptó y el usuario vio la página de confirmación).
+                    // Carrera: gana la primera URL completa (permite validar
+                    // `state` en ambos casos); el perdedor se cancela, lo que
+                    // cierra la hoja del navegador si el loopback ganó.
+                    // Los fallos no deciden: si el usuario cierra la hoja pero
+                    // el loopback entrega el código, el login continúa.
+                    let callback: URL = try await withThrowingTaskGroup(of: URL.self) { group in
+                        group.addTask { try await session.authenticate(url: authURL, callbackScheme: scheme) }
+                        group.addTask { try await receiver.waitForCallbackURL() }
+                        var firstError: Error?
+                        while let result = await group.nextResult() {
+                            switch result {
+                            case .success(let url):
+                                group.cancelAll()
+                                return url
+                            case .failure(let error):
+                                if firstError == nil { firstError = error }
+                            }
+                        }
+                        throw firstError ?? AuthError.userCancelled
+                    }
                     // Paridad IAP Desktop: al volver del navegador la app se
                     // activa automáticamente y muestra el árbol.
                     NSApplication.shared.activate()

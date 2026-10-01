@@ -28,6 +28,40 @@ struct LoopbackReceiverTests {
         #expect(try await task.value == "auth-code-123")
     }
 
+    @Test func callbackURLCarriesFullQuery() async throws {
+        // Camino loopback de la carrera: URL completa (code+state) aunque la
+        // sesión del navegador no intercepte.
+        let receiver = LoopbackReceiver()
+        let uri = try await receiver.start()
+        var components = URLComponents(url: uri, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            URLQueryItem(name: "code", value: "auth-code-123"),
+            URLQueryItem(name: "state", value: "state-abc"),
+        ]
+        let task = Task { try await receiver.waitForCallbackURL(timeoutSeconds: 10) }
+        let (_, response) = try await URLSession.shared.data(from: components.url!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let callback = try await task.value
+        let items = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems
+        #expect(items?.first(where: { $0.name == "code" })?.value == "auth-code-123")
+        #expect(items?.first(where: { $0.name == "state" })?.value == "state-abc")
+        #expect(callback.host == "127.0.0.1")
+        await receiver.cancel()
+    }
+
+    @Test func earlyCallbackURLIsKept() async throws {
+        // Como codeBeforeWaitIsKept pero para la URL completa.
+        let receiver = LoopbackReceiver()
+        let uri = try await receiver.start()
+        var components = URLComponents(url: uri, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "code", value: "early-code")]
+        let (_, response) = try await URLSession.shared.data(from: components.url!)
+        #expect((response as? HTTPURLResponse)?.statusCode == 200)
+        let callback = try await receiver.waitForCallbackURL(timeoutSeconds: 10)
+        #expect(callback.absoluteString.contains("code=early-code"))
+        await receiver.cancel()
+    }
+
     @Test func codeBeforeWaitIsKept() async throws {
         // Review #2: el código que llega antes de waitForCode no se descarta.
         let receiver = LoopbackReceiver()

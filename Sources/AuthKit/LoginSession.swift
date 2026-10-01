@@ -42,33 +42,63 @@ private final class WebAuthenticationLauncher: NSObject,
     }
 
     func authenticate(url: URL, callbackScheme: String?) async throws -> URL {
-        try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: url,
-                callbackURLScheme: callbackScheme
-            ) { [weak self] callback, error in
-                let result: Result<URL, AuthError>
-                if let callback {
-                    result = .success(callback)
-                } else if let authenticationError = error as? ASWebAuthenticationSessionError,
-                          authenticationError.code == .canceledLogin {
-                    result = .failure(.userCancelled)
-                } else {
-                    result = .failure(.invalidResponse)
+        // Caja Sendable con la sesión viva: al cancelar la Task (p. ej. el
+        // loopback ganó la carrera) se cierra la hoja del navegador.
+        // `cancel()` debe correr en main → vía `DispatchQueue.main`.
+        let box = DismissBox()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let session = ASWebAuthenticationSession(
+                    url: url,
+                    callbackURLScheme: callbackScheme
+                ) { [weak self] callback, error in
+                    let result: Result<URL, AuthError>
+                    if let callback {
+                        result = .success(callback)
+                    } else if let authenticationError = error as? ASWebAuthenticationSessionError,
+                              authenticationError.code == .canceledLogin {
+                        result = .failure(.userCancelled)
+                    } else {
+                        result = .failure(.invalidResponse)
+                    }
+                    Task { @MainActor in
+                        self?.activeSession = nil
+                        box.clear()
+                        continuation.resume(with: result)
+                    }
                 }
-                Task { @MainActor in
-                    self?.activeSession = nil
-                    continuation.resume(with: result)
+                session.presentationContextProvider = self
+                session.prefersEphemeralWebBrowserSession = false
+                activeSession = session
+                box.set(session)
+                guard session.start() else {
+                    activeSession = nil
+                    box.clear()
+                    continuation.resume(throwing: AuthError.invalidResponse)
+                    return
                 }
             }
-            session.presentationContextProvider = self
-            session.prefersEphemeralWebBrowserSession = false
-            activeSession = session
-            guard session.start() else {
-                activeSession = nil
-                continuation.resume(throwing: AuthError.invalidResponse)
-                return
-            }
+        } onCancel: { [box] in
+            DispatchQueue.main.async { box.cancel() }
         }
+    }
+}
+
+/// Contenedor `Sendable` para cerrar la hoja del navegador al cancelar.
+/// `cancel()` se ejecuta en main vía `DispatchQueue.main`.
+private final class DismissBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var session: ASWebAuthenticationSession?
+
+    func set(_ session: ASWebAuthenticationSession) {
+        lock.withLock { self.session = session }
+    }
+
+    func clear() {
+        lock.withLock { session = nil }
+    }
+
+    func cancel() {
+        lock.withLock { session }?.cancel()
     }
 }
