@@ -25,6 +25,9 @@ public enum AuthError: Error, Sendable, Equatable {
     case idTokenWithoutEmail
     /// Sin `refresh_token`: no se puede guardar la sesión offline.
     case missingRefreshToken
+    /// Este build no tiene client ID (p. ej. binario SwiftPM sin Info.plist):
+    /// se falla en local en vez de mandar `client_id` vacío a Google (CBU-28e).
+    case clientNotConfigured
 }
 
 /// Etapas del login installed-app, en orden. El texto es el de la ventana
@@ -94,6 +97,9 @@ public enum LoginFailure {
             return "The session expired. Please sign in again."
         case .workforceNotSupported:
             return "Workforce identity sign-in is not supported yet."
+        case .clientNotConfigured:
+            return "This build has no OAuth client ID. Run the IAPDesktopMac.app bundle, "
+                + "or set GOOGLE_OAUTH_CLIENT_ID for development builds."
         }
     }
 

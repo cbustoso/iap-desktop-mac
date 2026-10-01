@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 
 /// Respuesta de `POST /token` (`oauth2.googleapis.com/token`).
 ///
@@ -122,7 +123,7 @@ public struct TokenClient: Sendable {
             "code_verifier": verifier,
         ]
         if let secret = clientSecret { fields["client_secret"] = secret }
-        return try await post(fields: fields)
+        return try await post(fields: fields, grant: "authorization_code")
     }
 
     /// Refresca el access token.
@@ -133,10 +134,24 @@ public struct TokenClient: Sendable {
             "client_id": clientID,
         ]
         if let secret = clientSecret { fields["client_secret"] = secret }
-        return try await post(fields: fields)
+        return try await post(fields: fields, grant: "refresh_token")
     }
 
-    private func post(fields: [String: String]) async throws -> TokenResponse {
+    private static let log = Logger(subsystem: "com.iapdesktop.mac", category: "login")
+
+    /// Contexto de traza: build, prefijo del client y si hay secret (nunca su valor).
+    private var traceContext: String {
+        "client=\(LogRedaction.clientIDPrefix(clientID)) secretPresent=\(clientSecret?.isEmpty == false) \(BuildInfo.current)"
+    }
+
+    private func post(fields: [String: String], grant: String) async throws -> TokenResponse {
+        // Sin client ID Google responde "Could not determine client ID from
+        // request": se falla aquí, sin llamar a la red (CBU-28e).
+        guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            Self.log.error("token request skipped grant=\(grant, privacy: .public) cause=no_client_id \(BuildInfo.current, privacy: .public)")
+            throw AuthError.clientNotConfigured
+        }
+        Self.log.notice("token request grant=\(grant, privacy: .public) \(traceContext, privacy: .public)")
         var request = URLRequest(url: tokenURL)
         request.httpMethod = "POST"
         request.setValue(
@@ -155,6 +170,10 @@ public struct TokenClient: Sendable {
         guard http.statusCode == 200 else {
             // Cuerpo OAuth estándar (RFC 6749 §5.2): {"error": …, "error_description": …}.
             let body = try? JSONDecoder().decode(OAuthErrorBody.self, from: data)
+            Self.log.error("""
+                token response grant=\(grant, privacy: .public) http=\(http.statusCode, privacy: .public) \
+                oauth_error=\(body?.error ?? "-", privacy: .public) \(traceContext, privacy: .public)
+                """)
             throw AuthError.tokenEndpoint(
                 status: http.statusCode, error: body?.error, description: body?.errorDescription)
         }

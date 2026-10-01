@@ -28,16 +28,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Token vigente: sin refresh, sin traza.
             if let token = try? await facade.validAccessToken() { return token }
             let store = ClientIDStore()
-            let clientID = (try? store.resolve()) ?? ""
             do {
+                // Nunca `client_id` vacío (antes `?? ""`): Google respondía
+                // "Could not determine client ID from request" (CBU-28e).
+                guard let clientID = try? store.resolve() else { throw AuthError.clientNotConfigured }
                 let token = try await TokenRefresher().refreshedAccessToken(
                     facade: facade,
                     client: TokenClient(clientID: clientID, clientSecret: store.clientSecret()))
-                AppDelegate.log.info("token refresh succeeded")
+                AppDelegate.log.notice("token refresh succeeded \(BuildInfo.current, privacy: .public)")
                 return token
             } catch {
                 // Sin tokens ni codes: solo la causa clasificada.
-                AppDelegate.log.error("token refresh failed \(AppDelegate.diagnose(error).logCause, privacy: .public)")
+                AppDelegate.log.error("""
+                    token refresh failed \(AppDelegate.diagnose(error).logCause, privacy: .public) \
+                    \(BuildInfo.current, privacy: .public)
+                    """)
                 throw error
             }
         }
@@ -97,6 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (evento Reauthorized) recarga si hay sesión. Sin sesión o con fallo,
     /// el árbol conserva el mock visible.
     private func restoreSessionAndLoad() {
+        // Modo snapshot (tools/snapshot.sh, SnapshotSmokeTests): sin Keychain
+        // ni red. Antes cada `swift test` restauraba la sesión real del
+        // usuario e intentaba un refresh desde el binario suelto (CBU-28e).
+        guard ProcessInfo.processInfo.environment["IAP_SNAPSHOT"] == nil else {
+            Self.log.notice("autoload skipped reason=snapshot \(BuildInfo.current, privacy: .public)")
+            return
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.restoreSession()
@@ -131,19 +143,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// mock en silencio. Sin permiso para listar (403), usa los proyectos
     /// añadidos manualmente (paridad: picker Add project del original).
     private func loadLiveData(trigger: String) async {
-        Self.log.info("autoload started trigger=\(trigger, privacy: .public)")
+        Self.log.notice("autoload started trigger=\(trigger, privacy: .public) \(BuildInfo.current, privacy: .public)")
         switch await viewModel.reloadAllowingStored(workspace: workspace, stored: knownProjectIDs) {
         case .success(let discovered):
-            Self.log.info("""
+            Self.log.notice("""
                 autoload loaded discovered=\(discovered, privacy: .public) \
                 projects=\(self.viewModel.projectCount, privacy: .public) \
-                instances=\(self.viewModel.instanceCount, privacy: .public)
+                instances=\(self.viewModel.instanceCount, privacy: .public) \(BuildInfo.current, privacy: .public)
                 """)
             windowController?.statusNote = discovered || knownProjectIDs.isEmpty ? "" :
                 "Sin permiso para listar proyectos (403); mostrando \(knownProjectIDs.count) añadido(s). File → Add project… para añadir más."
         case .failure(let error):
             let failure = Self.diagnose(error)
-            Self.log.error("autoload failed \(failure.logCause, privacy: .public)")
+            Self.log.error("autoload failed \(failure.logCause, privacy: .public) \(BuildInfo.current, privacy: .public)")
             windowController?.statusNote = failure.userNote
         }
     }

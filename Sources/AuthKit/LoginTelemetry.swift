@@ -13,6 +13,34 @@ public enum LogRedaction {
     }
 }
 
+/// Identifica el build en cada línea de log (CBU-28e): descarta builds viejos
+/// y distingue el `.app` del binario SwiftPM suelto (sin Info.plist).
+public enum BuildInfo {
+    /// `build=0.1/app` o `build=dev/bare`.
+    public static func describe(version: String?, isAppBundle: Bool) -> String {
+        let trimmed = version?.trimmingCharacters(in: .whitespaces)
+        let label = (trimmed?.isEmpty == false) ? trimmed! : "dev"
+        return "build=\(label)/\(isAppBundle ? "app" : "bare")"
+    }
+
+    /// Build del proceso actual.
+    public static var current: String {
+        describe(
+            version: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+            isAppBundle: Bundle.main.bundleURL.pathExtension == "app")
+    }
+}
+
+extension LogRedaction {
+    /// Primeros 8 caracteres del client ID (el número de proyecto: no es
+    /// secreto). Nunca el ID completo ni el secret.
+    public static func clientIDPrefix(_ clientID: String) -> String {
+        let trimmed = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "<empty>" }
+        return String(trimmed.prefix(8)) + "…"
+    }
+}
+
 /// Causa de un fallo de la auto-carga de proyectos (o de un refresh de
 /// token), a partir de datos primitivos para no acoplar AuthKit a GCPClient.
 public enum AutoLoadFailure: Sendable, Equatable {
@@ -33,6 +61,11 @@ public enum AutoLoadFailure: Sendable, Equatable {
     /// `invalid_request` sin client_secret, `invalid_client`): se conserva el
     /// código OAuth, que no es secreto, para poder diagnosticar.
     case tokenRefreshRejected(status: Int, oauthError: String?, description: String?)
+    /// El refresh token guardado es de otro cliente OAuth (`unauthorized_client`):
+    /// hay que volver a iniciar sesión con el cliente actual.
+    case sessionFromOtherClient
+    /// Este build no tiene client ID (binario sin Info.plist): no se llamó a Google.
+    case clientNotConfigured
     /// Otro tipo de error (solo se conserva el nombre del tipo).
     case unknown(String)
     /// - Parameters:
@@ -47,9 +80,13 @@ public enum AutoLoadFailure: Sendable, Equatable {
             case .tokenExpired, .userCancelled:
                 self = .notSignedIn
             case .tokenEndpoint(let status, let oauthError, let description):
-                self = oauthError == "invalid_grant"
-                    ? .sessionRejected
-                    : .tokenRefreshRejected(status: status, oauthError: oauthError, description: description)
+                switch oauthError {
+                case "invalid_grant": self = .sessionRejected
+                case "unauthorized_client": self = .sessionFromOtherClient
+                default: self = .tokenRefreshRejected(status: status, oauthError: oauthError, description: description)
+                }
+            case .clientNotConfigured:
+                self = .clientNotConfigured
             case .network(let description):
                 self = .network(description)
             default:
@@ -80,6 +117,8 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .server(let status): return "cause=http http=\(status)"
         case .tokenRefreshRejected(let status, let oauthError, let description):
             return "cause=token_refresh http=\(status) oauth_error=\(oauthError ?? "-") desc=\(description ?? "-")"
+        case .sessionFromOtherClient: return "cause=other_client oauth_error=unauthorized_client"
+        case .clientNotConfigured: return "cause=no_client_id"
         case .unknown(let type): return "cause=unknown type=\(type)"
         }
     }
@@ -95,6 +134,10 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .server(let status): return "Google respondió \(status) al cargar los proyectos."
         case .tokenRefreshRejected(_, let oauthError, _):
             return "No se pudo renovar la sesión (\(oauthError ?? "error OAuth")): vuelve a iniciar sesión."
+        case .sessionFromOtherClient:
+            return "La sesión guardada es de otro cliente OAuth: vuelve a iniciar sesión."
+        case .clientNotConfigured:
+            return "Este build no tiene client ID OAuth (binario sin Info.plist): abre IAPDesktopMac.app."
         case .unknown: return "No se pudieron cargar los proyectos."
         }
     }

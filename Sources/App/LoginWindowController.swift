@@ -252,7 +252,7 @@ final class LoginWindowController: NSWindowController {
         func enter(_ next: LoginStage) {
             stage = next
             statusLabel.stringValue = next.statusText
-            Self.log.info("login stage=\(next.rawValue, privacy: .public)")
+            Self.log.notice("login stage=\(next.rawValue, privacy: .public) \(BuildInfo.current, privacy: .public)")
         }
         enter(.preparing)
 
@@ -333,9 +333,9 @@ final class LoginWindowController: NSWindowController {
                         expiresAt: Date().addingTimeInterval(TimeInterval(response.expiresIn)))
                     statusLabel.stringValue = "Signed in as \(credential.email)."
                     // Solo el dominio del email (REQ-AUTH-6), nunca la dirección completa.
-                    Self.log.info("""
+                    Self.log.notice("""
                         login succeeded domain=\(LogRedaction.emailDomain(credential.email), privacy: .public) \
-                        scopes=\(credential.scopes.count, privacy: .public)
+                        scopes=\(credential.scopes.count, privacy: .public) \(BuildInfo.current, privacy: .public)
                         """)
                     close()
                     return
@@ -346,7 +346,10 @@ final class LoginWindowController: NSWindowController {
             }
             throw AuthError.consentRequired
         } catch is CloudAccessNotGranted {
-            Self.log.error("login failed stage=\(stage.rawValue, privacy: .public) error=cloudPlatformNotGranted")
+            Self.log.error("""
+                login failed stage=\(stage.rawValue, privacy: .public) error=cloudPlatformNotGranted \
+                \(BuildInfo.current, privacy: .public)
+                """)
             statusLabel.stringValue = CloudAccessNotGranted.message
         } catch {
             Self.logFailure(error, at: stage)
@@ -369,17 +372,18 @@ final class LoginWindowController: NSWindowController {
         case AuthError.tokenEndpoint(let status, let oauthError, let description):
             log.error("""
                 login failed stage=\(stage.rawValue, privacy: .public) http=\(status, privacy: .public) \
-                oauth_error=\(oauthError ?? "-", privacy: .public) description=\(description ?? "-", privacy: .public)
+                oauth_error=\(oauthError ?? "-", privacy: .public) description=\(description ?? "-", privacy: .public) \
+                \(BuildInfo.current, privacy: .public)
                 """)
         case let authError as AuthError:
             log.error("""
                 login failed stage=\(stage.rawValue, privacy: .public) \
-                error=\(String(describing: authError), privacy: .public)
+                error=\(String(describing: authError), privacy: .public) \(BuildInfo.current, privacy: .public)
                 """)
         default:
             log.error("""
                 login failed stage=\(stage.rawValue, privacy: .public) \
-                type=\(String(describing: type(of: error)), privacy: .public)
+                type=\(String(describing: type(of: error)), privacy: .public) \(BuildInfo.current, privacy: .public)
                 """)
         }
     }
