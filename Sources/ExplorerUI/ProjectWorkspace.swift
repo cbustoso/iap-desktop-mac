@@ -16,16 +16,44 @@ public actor ProjectWorkspace {
         return try await reload(projectIDs: projects.map(\.projectId))
     }
 
+    /// Por qué falló el último discovery que cayó a los IDs conocidos
+    /// (`nil` si el último descubrió). Antes se perdía en el fallback
+    /// (CBU-47b): permite distinguir API apagada / scope / VPC-SC / IAM.
+    public private(set) var lastDiscoveryFailure: GoogleAPIFailure?
+
     /// Como `reloadAll`, pero si listar falla con 403 (la cuenta no tiene
     /// `resourcemanager.projects.list` aunque sí acceso a proyectos
-    /// concretos), carga los IDs conocidos en vez de fallar. Devuelve si se
+    /// concretos, o la API está apagada), carga los IDs conocidos en vez de
+    /// fallar y guarda el motivo en `lastDiscoveryFailure`. Devuelve si se
     /// pudo descubrir. Cualquier otro error se propaga.
     public func reloadAllowingStored(stored: [String]) async throws -> (projects: [ProjectInfo], discovered: Bool) {
         do {
-            return (try await reloadAll(), true)
-        } catch GCPClientError.apiError(let code, let reason) where code == 403 {
-            guard !stored.isEmpty else { throw GCPClientError.apiError(status: code, reason: reason) }
+            let projects = try await reloadAll()
+            lastDiscoveryFailure = nil
+            return (projects, true)
+        } catch let failure as GoogleAPIFailure where failure.status == 403 && !stored.isEmpty {
+            lastDiscoveryFailure = failure
             return (try await reload(projectIDs: stored), false)
+        }
+    }
+
+    /// Nota para la status bar cuando el discovery cayó a `shown` IDs
+    /// añadidos a mano: una acción distinta por causa.
+    public static func discoveryNote(for failure: GoogleAPIFailure?, shown: Int) -> String {
+        let fallback = "mostrando \(shown) añadido(s)."
+        switch failure?.cause {
+        case .serviceDisabled:
+            let target = failure?.activationURL?.absoluteString
+                ?? "APIs & Services del proyecto del cliente OAuth"
+            return "Cloud Resource Manager API no habilitada en el proyecto del cliente OAuth; \(fallback) Habilítala: \(target)"
+        case .scopeInsufficient:
+            return "El token no incluye el scope cloud-platform; \(fallback) Cierra sesión y vuelve a entrar aceptando el acceso a Google Cloud."
+        case .vpcServiceControls:
+            return "Listar proyectos está bloqueado por VPC Service Controls; \(fallback) Pide al admin acceso al perímetro."
+        case .permissionDenied:
+            return "Sin permiso para listar proyectos (403\(failure?.reason.map { " \($0)" } ?? "")); \(fallback) File → Add project… para añadir más."
+        case .unauthenticated, .other, nil:
+            return "No se pudieron listar proyectos (HTTP \(failure.map { String($0.status) } ?? "?")); \(fallback)"
         }
     }
 
