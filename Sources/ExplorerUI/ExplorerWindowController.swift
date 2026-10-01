@@ -32,6 +32,16 @@ public final class ExplorerWindowController: NSWindowController {
         }
     }
 
+    /// Cuenta mostrada a la derecha de la status bar: el email de la sesión
+    /// activa o "Sin sesión". (Antes era un texto fijo del mock de CBU-29.)
+    public func showAccount(email: String?) {
+        let trimmed = email?.trimmingCharacters(in: .whitespaces) ?? ""
+        statusBar.account = trimmed.isEmpty ? StatusBarView.signedOutText : trimmed
+    }
+
+    /// Texto de cuenta mostrado (para la App y los tests).
+    public var accountText: String { statusBar.account }
+
     /// Pestañas de sesión del área central (TerminalUI acopla aquí sus terminales).
     public var sessionTabs: any SessionTabHosting { sessionArea }
 

@@ -145,7 +145,7 @@ struct ExplorerWindowSmokeTests {
     @Test func statusBarAndEmptyState() {
         let controller = ExplorerWindowController(viewModel: ExplorerViewModel(projects: sample()))
         #expect(controller.statusBar.summary == "MOCK — 2 proyectos, 3 instancias")
-        #expect(controller.statusBar.account.contains("pendiente"))
+        #expect(controller.accountText == "Sin sesión")  // ya no es el texto fijo del mock
         #expect(controller.sessionArea.isShowingEmptyState)
         controller.sessionArea.openSession(identifier: "s1", title: "web-01", content: NSView())
         #expect(!controller.sessionArea.isShowingEmptyState)
