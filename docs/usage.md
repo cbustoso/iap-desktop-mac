@@ -122,3 +122,77 @@ implementación.
   ```bash
   xattr -dr com.apple.quarantine dist/IAPDesktopMac.app
   ```
+
+## 7. Client ID OAuth: login directo sin pegar nada
+
+Como el IAP Desktop original (que trae su propio client ID), **Sign in abre
+el navegador directamente**: el usuario no tiene que crear ni pegar nada si
+el build lleva un client ID embebido.
+
+### Orden de resolución (`ClientIDStore`)
+
+1. **Override manual** (`UserDefaults`, clave `oauth.clientID`): el enlace
+   discreto *Use a different OAuth client…* de la ventana Sign In muestra el
+   campo, ya rellenado con el valor en uso. Guardarlo vacío borra el
+   override y vuelve al valor por defecto.
+2. **`Info.plist` → `OAuthClientID`**: el valor por defecto del build. Con el
+   placeholder `__OAUTH_CLIENT_ID__` (o vacío) cuenta como ausente.
+3. **Variable de entorno `GOOGLE_OAUTH_CLIENT_ID`**: para desarrollo.
+
+Si no hay ninguno, la ventana Sign In muestra el campo y un mensaje con
+enlace a Google Cloud Console. Pulsar *Sign in* con el valor ya resuelto
+**no** lo guarda como override, así que una actualización del client ID
+embebido sigue aplicando a quien no haya puesto uno propio.
+
+### Embeber el client ID (maintainer, una sola vez)
+
+1. En [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)
+   (Google Auth Platform → Clients) crea un cliente OAuth de tipo
+   **Desktop app**. Si el proyecto aún no tiene pantalla de consentimiento,
+   configúrala antes (scopes `cloud-platform`, `openid` y `email`).
+2. Copia el **client ID** (`123456789-abc….apps.googleusercontent.com`).
+   **No** copies el client secret: no hace falta (ver abajo) y no debe ir
+   al repositorio.
+3. Sustituye el placeholder en `resources/Info.plist`:
+
+   ```xml
+   <key>OAuthClientID</key>
+   <string>123456789-abc….apps.googleusercontent.com</string>
+   ```
+
+4. Genera el bundle con `tools/make-app-bundle.sh`: el script copia ese
+   `Info.plist` dentro de `dist/IAPDesktopMac.app`.
+
+**Usa siempre un cliente propio.** No embebas el client ID de otra
+aplicación, aunque sea público (p. ej. el del IAP Desktop de Google, que su
+documentación publica para que los administradores de Workspace lo
+identifiquen): la pantalla de consentimiento y la consola de administración
+mostrarían esa otra app como titular de los tokens, que en realidad recibe
+este programa, y la confianza que un administrador haya dado a esa app se
+aplicaría sin saberlo a esta.
+
+El client ID de una app instalada **no es secreto** (Google lo indica así:
+el cliente no puede mantener confidencial nada embebido), por eso puede ir
+en el `Info.plist`. Un test (`shippedInfoPlistHasNoClientSecret`) impide
+añadir una clave de secreto por error.
+
+### PKCE sin `client_secret`
+
+El login usa el flujo para apps instaladas con **PKCE (S256)** y redirect a
+loopback. En la [documentación de Google para apps
+instaladas](https://developers.google.com/identity/protocols/oauth2/native-app),
+`client_secret` figura como **opcional** tanto en el canje del código
+(`/token` con `code_verifier`) como en el refresh: con PKCE no se envía.
+
+### Limitaciones a tener en cuenta
+
+- **Solo el `.app` lee el `Info.plist`.** El binario suelto
+  `.build/debug/App` (y `tools/snapshot.sh`) no tiene `Info.plist`: ahí el
+  client ID embebido no existe y hay que exportar
+  `GOOGLE_OAUTH_CLIENT_ID` o usar el override de la ventana Sign In.
+- **App no verificada por Google.** A diferencia del original (cliente de
+  Google, verificado), un cliente propio con usuarios externos muestra el
+  aviso "Google hasn't verified this app" y, en modo *Testing*, solo
+  admite los usuarios de prueba que añadas en Cloud Console. Para uso
+  interno de una organización, marca la pantalla de consentimiento como
+  *Internal*.

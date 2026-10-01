@@ -193,6 +193,20 @@ struct ClientIDStoreTests {
         #expect(value == ClientIDStore.bundlePlaceholder || value.hasSuffix(".apps.googleusercontent.com"))
     }
 
+    @Test func shippedInfoPlistHasNoClientSecret() throws {
+        // PKCE para apps instaladas no usa client_secret; un secreto en el
+        // repo sería una filtración (docs/usage.md §7).
+        let plist = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("resources/Info.plist")
+        let data = try Data(contentsOf: plist)
+        let dictionary = try #require(
+            try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        let secretKeys = dictionary.keys.filter { $0.lowercased().contains("secret") }
+        #expect(secretKeys.isEmpty, "claves sospechosas: \(secretKeys)")
+        #expect(!String(decoding: data, as: UTF8.self).contains("GOCSPX-"))  // prefijo de secretos de Google
+    }
+
     private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
         let suiteName = "ClientIDStoreTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
