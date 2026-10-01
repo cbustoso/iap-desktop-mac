@@ -13,10 +13,16 @@ extension NSWorkspace: WorkspaceOpening {
     }
 }
 
+/// Lanzador de `.rdp` (inyectable en tests del conector).
+@MainActor
+public protocol WindowsAppLaunching {
+    func open(_ fileURL: URL) async throws(RdpError)
+}
+
 /// Abre un `.rdp` con "Windows App" (fallback T-RDP-1, REQ-RDP-2). No controla
 /// la sesión: solo verifica que el lanzamiento tuvo éxito.
 @MainActor
-public struct WindowsAppLauncher {
+public struct WindowsAppLauncher: WindowsAppLaunching {
     /// Bundle id de "Windows App" 11.x y del antiguo "Microsoft Remote Desktop" 10.
     public static let bundleIdentifier = "com.microsoft.rdc.macos"
 

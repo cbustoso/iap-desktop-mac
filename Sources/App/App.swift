@@ -1,6 +1,7 @@
 import AppKit
 import AuthKit
 import OSLog
+import RDPBridge
 import ExplorerUI
 import GCPClient
 import SSHKit
@@ -77,6 +78,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             emailHint: { await facade.currentEmail ?? "" })
     }()
 
+    // MARK: RDP vía fallback .rdp + Windows App (CBU-52)
+
+    private lazy var rdpFlow: RdpConnectFlow = {
+        let facade = credentialFacade
+        return RdpConnectFlow(
+            client: vmClient,
+            tunnels: IapRdpTunnels(accessToken: accessToken),
+            email: { await facade.currentEmail },
+            window: { [weak self] in self?.windowController?.window },
+            note: { [weak self] in self?.windowController?.statusNote = $0 })
+    }()
+    private var windowsConnect: WindowsConnectInterposer?
+
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
@@ -92,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController?.onAddProject = { [weak self] in self?.addProjectDialog(nil) }
         wireSshConnect()
         wireVmControl()
+        wireRdpConnect()
         windowController?.showWindow(nil)
         wireRefreshAction()
         app.activate()
@@ -272,6 +287,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Los túneles mueren con el proceso; los .rdp (usuario, sin contraseña) se borran.
+    func applicationWillTerminate(_ notification: Notification) {
+        RdpFallbackConnector.removeGeneratedFiles()
+    }
+
     // MARK: - Menú principal (File/Session/View/Tools/Window/Help como el original)
 
     private func installMenu() {
@@ -312,7 +332,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Session: conexión llega en M1 (SSH) / M2 (RDP); sin acción → deshabilitado.
         mainMenu.addItem(submenu("Session", [
-            item("Connect", #selector(ExplorerWindowController.connectSelectedInstance(_:))),
+            connectItem(),
             pending("Connect as user…", milestone: "M2"),
             pending("Connection settings…", milestone: "M2"),
         ]))
@@ -358,6 +378,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// REQ-AUTH-3 en producto: cierra sesión revocando en el servidor
     /// (best-effort dentro de la fachada). Re-review R2 #5.
+    /// Session > Connect: Windows → RDP; el resto, al Explorer (SSH).
+    private func connectItem() -> NSMenuItem {
+        let menuItem = item("Connect", #selector(connectSelected(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func connectSelected(_ sender: Any?) {
+        if let instance = viewModel.selection, instance.os == .windows {
+            rdpFlow.connect(instance)
+        } else {
+            windowController?.connectSelectedInstance(sender)
+        }
+    }
+
     private func signOutItem() -> NSMenuItem {
         let menuItem = item("Sign Out", #selector(signOut(_:)))
         menuItem.target = self
@@ -377,6 +412,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowController.onConnectRequest = { [weak self] instance in
             self?.connect(to: instance)
         }
+    }
+
+    /// Doble clic y menú contextual en VMs Windows → RDP (ExplorerUI solo cablea Linux).
+    private func wireRdpConnect() {
+        windowsConnect = WindowsConnectInterposer(window: windowController?.window) { [weak self] instance in
+            self?.rdpFlow.connect(instance)
+        }
+        if windowsConnect == nil { RdpConnectFlow.log.error("rdp hookup failed: outline not found") }
     }
 
     private func wireVmControl() {
@@ -495,6 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func signOut(_ sender: Any?) {
+        Task { await rdpFlow.shutdown() }
         Task {
             await credentialFacade.revoke(revokingWith: RevokeClient())
         }
