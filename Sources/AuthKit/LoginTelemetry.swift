@@ -32,10 +32,9 @@ public enum AutoLoadFailure: Sendable, Equatable {
     /// `/token` rechazó el refresh con otro error OAuth (p. ej.
     /// `invalid_request` sin client_secret, `invalid_client`): se conserva el
     /// código OAuth, que no es secreto, para poder diagnosticar.
-    case tokenRefreshRejected(status: Int, oauthError: String?)
+    case tokenRefreshRejected(status: Int, oauthError: String?, description: String?)
     /// Otro tipo de error (solo se conserva el nombre del tipo).
     case unknown(String)
-
     /// - Parameters:
     ///   - httpStatus: estado HTTP de la API de Google, si lo hubo.
     ///   - reason: motivo de la API (`SERVICE_DISABLED`, …), si lo hubo.
@@ -47,10 +46,10 @@ public enum AutoLoadFailure: Sendable, Equatable {
             switch authError {
             case .tokenExpired, .userCancelled:
                 self = .notSignedIn
-            case .tokenEndpoint(let status, let oauthError, _):
+            case .tokenEndpoint(let status, let oauthError, let description):
                 self = oauthError == "invalid_grant"
                     ? .sessionRejected
-                    : .tokenRefreshRejected(status: status, oauthError: oauthError)
+                    : .tokenRefreshRejected(status: status, oauthError: oauthError, description: description)
             case .network(let description):
                 self = .network(description)
             default:
@@ -79,8 +78,8 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .apiNotEnabled: return "cause=api-disabled http=403"
         case .network(let description): return "cause=network detail=\(description)"
         case .server(let status): return "cause=http http=\(status)"
-        case .tokenRefreshRejected(let status, let oauthError):
-            return "cause=token_refresh http=\(status) oauth_error=\(oauthError ?? "-")"
+        case .tokenRefreshRejected(let status, let oauthError, let description):
+            return "cause=token_refresh http=\(status) oauth_error=\(oauthError ?? "-") desc=\(description ?? "-")"
         case .unknown(let type): return "cause=unknown type=\(type)"
         }
     }
@@ -94,7 +93,7 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .apiNotEnabled: return "API sin habilitar (403): `gcloud services enable cloudresourcemanager.googleapis.com` o usa Add project."
         case .network: return "Sin conexión con Google: no se pudieron cargar los proyectos."
         case .server(let status): return "Google respondió \(status) al cargar los proyectos."
-        case .tokenRefreshRejected(_, let oauthError):
+        case .tokenRefreshRejected(_, let oauthError, _):
             return "No se pudo renovar la sesión (\(oauthError ?? "error OAuth")): vuelve a iniciar sesión."
         case .unknown: return "No se pudieron cargar los proyectos."
         }
