@@ -14,6 +14,7 @@ import TunnelKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: ExplorerWindowController?
     private var loginWindowController: LoginWindowController?
+    private var settingsPanelController: SettingsPanelWindowController?
     private let credentialFacade = CredentialFacade()
     private let viewModel = ExplorerViewModel(projects: MockWorkspace.sample())
 
@@ -104,6 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.setActivationPolicy(.regular)
         windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
         windowController?.onAddProject = { [weak self] in self?.addProjectDialog(nil) }
+        let settingsDataSource = ApplicationSettingsDataSource { [weak self] in
+            self?.viewModel.projects ?? []
+        }
+        let settingsPanel = SettingsPanelWindowController(dataSource: settingsDataSource)
+        settingsPanelController = settingsPanel
+        windowController?.onOpenSettings = { [weak settingsPanel] scope in
+            settingsPanel?.show(preferredScope: scope)
+        }
         wireSshConnect()
         wireVmControl()
         wireRdpConnect()

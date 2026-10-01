@@ -137,6 +137,73 @@ struct KeychainSettingsStoreTests {
     }
 }
 
+@Suite("SettingsStoreHierarchy")
+struct SettingsStoreHierarchyTests {
+    @Test("Effective values override and fall back through all four levels")
+    func inheritance() throws {
+        let universe = MemorySettingsStore()
+        let project = MemorySettingsStore()
+        let zone = MemorySettingsStore()
+        let instance = MemorySettingsStore()
+        try universe.put(key: "port", value: 22)
+        try zone.put(key: "port", value: 2200)
+
+        let hierarchy = SettingsStoreHierarchy { scope, _ in
+            switch scope {
+            case .universe: universe
+            case .project: project
+            case .zone: zone
+            case .instance: instance
+            }
+        }
+
+        let projectValue: Setting<Int> = try hierarchy.effectiveStore(
+            at: .project("sample-project")
+        ).read(key: "port", defaultValue: 1)
+        let zoneValue: Setting<Int> = try hierarchy.effectiveStore(
+            at: .zone(project: "sample-project", zone: "us-central1-a")
+        ).read(key: "port", defaultValue: 1)
+        let instanceFallback: Setting<Int> = try hierarchy.effectiveStore(
+            at: .instance(project: "sample-project", zone: "us-central1-a", instance: "vm-1")
+        ).read(key: "port", defaultValue: 1)
+
+        #expect(projectValue.value == 22)
+        #expect(zoneValue.value == 2200)
+        #expect(instanceFallback.value == 2200)
+
+        try instance.put(key: "port", value: 2222)
+        let instanceOverride: Setting<Int> = try hierarchy.effectiveStore(
+            at: .instance(project: "sample-project", zone: "us-central1-a", instance: "vm-1")
+        ).read(key: "port", defaultValue: 1)
+        #expect(instanceOverride.value == 2222)
+        #expect(SettingsScope.zone(project: "p", zone: "z").persistencePath == "p/zone-z")
+        #expect(SettingsScope.instance(project: "p", zone: "z", instance: "vm").persistencePath == "p/vm-vm")
+    }
+
+    @Test("writeAll skips clean settings and targets only the selected level")
+    func dirtyWritesOnly() throws {
+        let universe = MemorySettingsStore()
+        let project = MemorySettingsStore()
+        let hierarchy = SettingsStoreHierarchy { scope, _ in
+            if case .project = scope { return project }
+            return universe
+        }
+        let scope = SettingsScope.project("sample-project")
+        let clean: Setting<Int> = try project.read(key: "port", defaultValue: 22)
+
+        try hierarchy.writeAll([SettingsWrite(clean)], at: scope)
+        #expect(project.writeCount == 0)
+        #expect(universe.writeCount == 0)
+
+        var dirty = clean
+        dirty.value = 2200
+        try hierarchy.writeAll([SettingsWrite(dirty)], at: scope)
+        #expect(project.writeCount == 1)
+        #expect(universe.writeCount == 0)
+        #expect(try project.persisted(Int.self, key: "port") == 2200)
+    }
+}
+
 struct OverlayCase: Sendable, CustomTestStringConvertible {
     let specified: Bool
     let value: Int
@@ -156,6 +223,9 @@ struct PolicyCase: Sendable, CustomTestStringConvertible {
 private final class MemorySettingsStore: SettingsStore, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [String: Data] = [:]
+    private var writes = 0
+
+    var writeCount: Int { lock.withLock { writes } }
 
     func put<Value: Encodable>(key: String, value: Value) throws {
         let data = try JSONEncoder().encode(value)
@@ -199,7 +269,10 @@ private final class MemorySettingsStore: SettingsStore, @unchecked Sendable {
 
     func write(_ setting: any AnySetting) throws {
         let data = setting.isSpecified ? try setting.encodedValue() : nil
-        lock.withLock { values[setting.key] = data }
+        lock.withLock {
+            writes += 1
+            values[setting.key] = data
+        }
     }
 
     func clear() throws {

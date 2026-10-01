@@ -60,6 +60,8 @@ public final class ExplorerWindowController: NSWindowController {
     public var onConnectRequest: (@MainActor (InstanceInfo) -> Void)?
     /// La App ejecuta la operación GCE después de la confirmación del usuario.
     public var onVmControlRequest: (@MainActor (VmControlAction, InstanceInfo) -> Void)?
+    /// La App aporta la persistencia; ExplorerUI solo comunica el nivel seleccionado.
+    public var onOpenSettings: (@MainActor (SettingsPanelScope?) -> Void)?
     let propertiesPane = PropertiesView()
     let statusBar = StatusBarView()
 
@@ -242,7 +244,20 @@ public final class ExplorerWindowController: NSWindowController {
     }
 
     @objc public func openSettings(_ sender: Any?) {
-        showStub(title: "Settings", milestone: "M2")
+        onOpenSettings?(selectedNode.map(Self.settingsScope))
+    }
+
+    private static func settingsScope(for node: ExplorerNode) -> SettingsPanelScope {
+        switch node {
+        case .cloud:
+            .universe
+        case .project(let project):
+            .project(project.name)
+        case .zone(let zone):
+            .zone(project: zone.project, zone: zone.name)
+        case .instance(let instance):
+            .instance(project: instance.project, zone: instance.zone, instance: instance.name)
+        }
     }
 
     /// Muestra u oculta el panel Properties (menú View).
