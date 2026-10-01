@@ -25,16 +25,12 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <!--
-      OAuth client ID por defecto (CBU-36). Maintainer: sustituir el
-      placeholder por un client ID de tipo "Desktop app" creado en
-      https://console.cloud.google.com/apis/credentials
-      (formato: 123456789-abc.apps.googleusercontent.com).
-      Con el placeholder, la app usa el override guardado por el usuario o
-      la variable de entorno GOOGLE_OAUTH_CLIENT_ID. Un client ID de app
-      instalada no es secreto (Google lo documenta así). No añadir nunca el
-      client secret: con PKCE no se usa. Pasos: docs/usage.md §7.
+      OAuth client ID por defecto (CBU-45): es el client ID público del
+      propio IAP Desktop, publicado en su documentación, así el login
+      funciona sin que el usuario cree ni pegue nada. Un client ID de app
+      instalada no es secreto. No añadir nunca el client secret.
     -->
     <key>OAuthClientID</key>
-    <string>__OAUTH_CLIENT_ID__</string>
+    <string>78381520511-4fu6ve6b49kknk3dkdnpudoi0tivq6jn.apps.googleusercontent.com</string>
 </dict>
 </plist>
