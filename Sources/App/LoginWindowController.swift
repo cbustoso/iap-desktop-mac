@@ -261,6 +261,10 @@ final class LoginWindowController: NSWindowController {
                     let callback = try await sessionFactory(window).authenticate(
                         url: request.url,
                         callbackScheme: redirectURI.scheme)
+                    // Paridad IAP Desktop: al volver del navegador la app se
+                    // activa automáticamente y muestra el árbol.
+                    NSApplication.shared.activate()
+                    window.makeKeyAndOrderFront(nil)
                     await receiver.cancel()
 
                     if Self.callbackError(callback) == "consent_required", attempt == 0 {
