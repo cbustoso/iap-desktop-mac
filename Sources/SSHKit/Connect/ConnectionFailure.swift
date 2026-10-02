@@ -29,6 +29,12 @@ public struct ConnectionFailure: Sendable, Equatable {
             self.init(
                 message: "La VM rechazó la llave SSH. Puede que la autorización aún no se haya propagado.",
                 helpTopic: .managingOsLogin)
+        case HostKeyVerificationError.changed(let change):
+            self.init(message: change.userMessage, helpTopic: nil)
+        case HostKeyVerificationError.storeUnavailable:
+            self.init(
+                message: "No se pudo leer ni guardar la identidad de la VM en el llavero. Conexión bloqueada.",
+                helpTopic: nil)
         case SSHTransportError.hostKeyRejected:
             self.init(
                 message: "La identidad (host key) de la VM cambió desde la última conexión. Conexión bloqueada.",

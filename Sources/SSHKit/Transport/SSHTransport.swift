@@ -15,14 +15,22 @@ public enum SSHTransportError: Error, Sendable, Equatable {
     case shellRejected
 }
 
-/// Decide si se acepta la host key del servidor.
-/// T-SSH-7 implementa TOFU/confirmación; aquí solo pin explícito o test.
+/// Decide si se acepta la host key del servidor. TOFU persistente en
+/// `HostKeyVerifier` (T-SSH-7); aquí, pin explícito o test.
 public struct SSHHostKeyPolicy: Sendable {
-    let accepts: @Sendable (NIOSSHPublicKey) -> Bool
+    /// `nil` = aceptar; si no, el error tipado con el que se rechaza.
+    let evaluate: @Sendable (NIOSSHPublicKey) -> (any Error)?
 
     public init(accepts: @escaping @Sendable (NIOSSHPublicKey) -> Bool) {
-        self.accepts = accepts
+        evaluate = { accepts($0) ? nil : SSHTransportError.hostKeyRejected }
     }
+
+    /// Rechaza con el error devuelto (p. ej. `HostKeyVerificationError`).
+    public init(verify: @escaping @Sendable (NIOSSHPublicKey) -> (any Error)?) {
+        evaluate = verify
+    }
+
+    func accepts(_ key: NIOSSHPublicKey) -> Bool { evaluate(key) == nil }
 
     /// Solo acepta exactamente esta host key.
     public static func pinned(_ expected: NIOSSHPublicKey) -> SSHHostKeyPolicy {
@@ -280,11 +288,11 @@ private final class HostKeyDelegate: NIOSSHClientServerAuthenticationDelegate {
     }
 
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
-        if policy.accepts(hostKey) {
-            validationCompletePromise.succeed(())
+        if let error = policy.evaluate(hostKey) {
+            firstError.record(error)
+            validationCompletePromise.fail(error)
         } else {
-            firstError.record(SSHTransportError.hostKeyRejected)
-            validationCompletePromise.fail(SSHTransportError.hostKeyRejected)
+            validationCompletePromise.succeed(())
         }
     }
 }
