@@ -294,11 +294,11 @@ private final class SessionHostKeyDelegate: NIOSSHClientServerAuthenticationDele
     }
 
     func validateHostKey(hostKey: NIOSSHPublicKey, validationCompletePromise: EventLoopPromise<Void>) {
-        if policy.accepts(hostKey) {
-            validationCompletePromise.succeed(())
+        if let error = policy.evaluate(hostKey) {
+            failure.fail(error)
+            validationCompletePromise.fail(error)
         } else {
-            failure.fail(SSHTransportError.hostKeyRejected)
-            validationCompletePromise.fail(SSHTransportError.hostKeyRejected)
+            validationCompletePromise.succeed(())
         }
     }
 }
@@ -308,7 +308,7 @@ private struct AuthFailure: Sendable {
     let firstError: FirstErrorBox
     let authenticated: EventLoopPromise<Void>
 
-    func fail(_ error: SSHTransportError) {
+    func fail(_ error: any Error) {
         firstError.record(error)
         authenticated.fail(error)
     }
