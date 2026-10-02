@@ -39,6 +39,11 @@ public final class WindowsCredentialCoordinator {
         public let credential: WindowsLogonCredential
         /// `false` si el reset funcionó pero no se pudo guardar (Keychain).
         public let persisted: Bool
+
+        public init(credential: WindowsLogonCredential, persisted: Bool) {
+            self.credential = credential
+            self.persisted = persisted
+        }
     }
 
     private let vault: any WindowsCredentialVault

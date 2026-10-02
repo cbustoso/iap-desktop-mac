@@ -176,12 +176,36 @@ final class RdpConnectFlow {
 
     /// `nil` = cancelado; `.some(nil)` = sin usuario (Windows App lo pedirá).
     private func resolveCredential(for target: RdpTarget, instance: InstanceInfo) async throws -> String?? {
-        // Guardada en Keychain y utilizable: no se regenera (portapapeles = entrega inmediata).
+        // Guardada en Keychain y utilizable: se muestra el diálogo (no solo
+        // aviso) porque Windows App no puede rellenar sola la contraseña del
+        // .rdp — el usuario debe pegarla desde el portapapeles.
         if let stored = credentials.stored(for: instance) {
+            Self.log.notice("""
+                rdp keychain hit target=\(target.description, privacy: .public) \
+                user=\(stored.username, privacy: .public)
+                """)
             copyToPasteboard(stored.password)
-            note("RDP: contraseña de \(stored.username) (llavero) copiada al portapapeles")
-            return .some(stored.username)
+            switch showGenerated(
+                WindowsCredentialCoordinator.Generated(credential: stored, persisted: true),
+                instance: instance, connecting: true)
+            {
+            case .done:
+                return .some(stored.username)
+            case .cancel:
+                return nil
+            case .regenerate:
+                guard confirmRegenerate(instance: instance, username: stored.username) else {
+                    return .some(stored.username)
+                }
+                guard let credential = try await generateAndShow(
+                    instance, username: stored.username, connecting: true)
+                else {
+                    return nil
+                }
+                return .some(credential.username)
+            }
         }
+        Self.log.notice("rdp keychain miss target=\(target.description, privacy: .public)")
         let suggested = WindowsUsername.suggest(email: await email())
         switch askForCredentials(instance: instance, suggested: suggested, connecting: true, replacing: false) {
         case .cancel:
