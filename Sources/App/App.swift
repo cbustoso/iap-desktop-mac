@@ -22,6 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// sesión expira al primer uso y el árbol conserva el mock (fallback).
     private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
     private lazy var vmClient = GCPClient(tokenProvider: accessToken)
+    private var serialOutputPanels: [String: SerialOutputWindowController] = [:]
 
     /// Token OAuth de la sesión activa (refresh automático vía fachada).
     /// Compartido por Compute, OS Login y el túnel IAP; nunca se registra.
@@ -342,6 +343,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Session: conexión llega en M1 (SSH) / M2 (RDP); sin acción → deshabilitado.
         mainMenu.addItem(submenu("Session", [
             connectItem(),
+            serialOutputItem(),
             pending("Connect as user…", milestone: "M2"),
             pending("Connection settings…", milestone: "M2"),
         ]))
@@ -392,6 +394,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuItem = item("Connect", #selector(connectSelected(_:)))
         menuItem.target = self
         return menuItem
+    }
+
+    private func serialOutputItem() -> NSMenuItem {
+        let menuItem = item("Show serial port output", #selector(showSerialPortOutput(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func showSerialPortOutput(_ sender: Any?) {
+        guard let instance = viewModel.selection else {
+            let alert = NSAlert()
+            alert.messageText = "Show serial port output"
+            alert.informativeText = "Selecciona una instancia en Project Explorer."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        let panel = serialOutputPanels[instance.id]
+            ?? SerialOutputWindowController(instance: instance, client: vmClient)
+        serialOutputPanels[instance.id] = panel
+        panel.showWindow(sender)
     }
 
     @objc private func connectSelected(_ sender: Any?) {
