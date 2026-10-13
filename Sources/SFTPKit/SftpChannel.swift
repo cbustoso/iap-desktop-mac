@@ -108,16 +108,32 @@ public actor SftpChannel {
     // MARK: - Peticiones (base de T-SFTP-3/4)
 
     /// Envía una petición y espera su respuesta, sin bloquear otras en vuelo.
-    func request(_ type: SftpPacketType, _ body: (inout SftpWriter) -> Void = { _ in }) async throws -> SftpResponse {
-        guard !closed else { throw SftpError.channelClosed }
+    /// `nonisolated`: el estado compartido vive en `table` (que, tras `close`,
+    /// rechaza nuevas reservas) y `transport`, ambos `Sendable`.
+    nonisolated func request(
+        _ type: SftpPacketType, _ body: (inout SftpWriter) -> Void = { _ in }
+    ) async throws -> SftpResponse {
+        var writer = SftpWriter()
+        body(&writer)
+        return try await response(for: try await submit(type, payload: writer.data))
+    }
+
+    /// Reserva un id y envía la petición sin esperar (pipelining): la respuesta
+    /// se recoge después con `response(for:)`. `payload` es el cuerpo tras el id.
+    nonisolated func submit(_ type: SftpPacketType, payload: Data) async throws -> UInt32 {
         let id = try table.reserve()
+        let packet = SftpPacket.request(type, id: id) { $0.raw(payload) }
         do {
-            try await transport.write(SftpPacket.request(type, id: id, body).encoded())
+            try await transport.write(packet.encoded())
         } catch {
             table.cancel(id)
             throw SftpError.channelClosed
         }
-        return try await table.wait(id)
+        return id
+    }
+
+    nonisolated func response(for id: UInt32) async throws -> SftpResponse {
+        try await table.wait(id)
     }
 
     /// `SSH_FXP_REALPATH` (p. ej. `"."` → directorio de inicio).
