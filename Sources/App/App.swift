@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var vmClient = GCPClient(tokenProvider: accessToken)
     private var serialOutputPanels: [String: SerialOutputWindowController] = [:]
     private var eventLogPanels: [String: EventLogWindowController] = [:]
+    private var inventoryPanels: [String: InventoryWindowController] = [:]
 
     /// Token OAuth de la sesión activa (refresh automático vía fachada).
     /// Compartido por Compute, OS Login y el túnel IAP; nunca se registra.
@@ -118,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         wireSshConnect()
         wireVmControl()
         wireRdpConnect()
+        wireInventory()
         windowController?.showWindow(nil)
         wireRefreshAction()
         app.activate()
@@ -480,6 +482,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func wireVmControl() {
         windowController?.onVmControlRequest = { [weak self] action, instance in
             self?.control(instance, action: action)
+        }
+    }
+
+    private func wireInventory() {
+        windowController?.onSoftwarePackagesRequest = { [weak self] scope in
+            guard let self else { return }
+            let panel = inventoryPanels[scope.id]
+                ?? InventoryWindowController(scope: scope, client: vmClient)
+            inventoryPanels[scope.id] = panel
+            panel.showWindow(nil)
         }
     }
 

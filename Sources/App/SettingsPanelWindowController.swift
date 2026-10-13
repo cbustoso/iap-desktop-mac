@@ -99,7 +99,7 @@ final class SettingsPanelWindowController: NSWindowController {
         case .universe: return "All projects (defaults)"
         case .project(let p): return "Project \(p)"
         case .zone(let p, let z): return "Zone \(z) (\(p))"
-        case .instance(let p, let z, let i): return "\(i) (\(z))"
+        case .instance(_, let z, let i): return "\(i) (\(z))"
         }
     }
 

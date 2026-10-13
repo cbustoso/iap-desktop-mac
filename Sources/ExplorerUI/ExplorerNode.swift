@@ -140,6 +140,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
     case connectionSettings
     /// Solo instancias Windows (paridad "Generate Windows logon credentials").
     case generateWindowsCredentials
+    case softwarePackages
     case refreshProject
     case properties
 
@@ -149,6 +150,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
         case .connectAsUser: return "Connect as user…"
         case .connectionSettings: return "Connection settings…"
         case .generateWindowsCredentials: return "Generate Windows credentials…"
+        case .softwarePackages: return "Software packages"
         case .refreshProject: return "Refresh project"
         case .properties: return "Properties"
         }
@@ -160,6 +162,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
         case .connectAsUser: return "person.badge.key"
         case .connectionSettings: return "slider.horizontal.3"
         case .generateWindowsCredentials: return "key"
+        case .softwarePackages: return "shippingbox"
         case .refreshProject: return "arrow.clockwise"
         case .properties: return "info.circle"
         }
@@ -170,7 +173,7 @@ public enum ExplorerCommand: String, Sendable, CaseIterable {
         switch self {
         case .connect: return "M1"
         case .connectAsUser, .connectionSettings: return "M2"
-        case .generateWindowsCredentials, .refreshProject, .properties: return nil
+        case .generateWindowsCredentials, .softwarePackages, .refreshProject, .properties: return nil
         }
     }
 
@@ -189,13 +192,16 @@ public enum ExplorerContextMenu {
             let credentials: [ContextMenuEntry] = instance.os == .windows
                 ? [.command(.generateWindowsCredentials)] : []
             return [.command(.connect), .command(.connectAsUser), .command(.connectionSettings)]
-                + credentials + [
+                + credentials + [.command(.softwarePackages),
                 .separator,
                 .command(.refreshProject),
                 .separator,
                 .command(.properties),
             ]
-        case .project, .zone:
+        case .zone:
+            return [.command(.softwarePackages), .separator, .command(.refreshProject),
+                    .separator, .command(.properties)]
+        case .project:
             return [.command(.refreshProject), .separator, .command(.properties)]
         case .cloud:
             return [.command(.properties)]
