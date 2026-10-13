@@ -390,6 +390,11 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
     private let originalAction: Selector?
     private weak var originalMenuDelegate: (any NSMenuDelegate)?
     private let onWindowsConnect: (InstanceInfo) -> Void
+    /// GH-60: "Browse files…" en instancias Linux (SFTP); `nil` = sin item.
+    var onBrowseFiles: ((InstanceInfo) -> Void)?
+
+    /// Título del item SFTP del menú contextual.
+    static let browseFilesTitle = "Browse files…"
 
     init?(window: NSWindow?, onWindowsConnect: @escaping (InstanceInfo) -> Void) {
         guard let outline = Self.findOutline(in: window?.contentView) else { return nil }
@@ -410,13 +415,18 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
         }
     }
 
-    /// Instancia Windows de la fila `row`, si lo es.
-    private func windowsInstance(atRow row: Int) -> InstanceInfo? {
+    /// Instancia de la fila `row`, si es una instancia.
+    private func instance(atRow row: Int) -> InstanceInfo? {
         guard row >= 0, let item = outline?.item(atRow: row),
               let node = Mirror(reflecting: item).children.first(where: { $0.label == "node" })?.value as? ExplorerNode,
-              case .instance(let instance) = node, instance.os == .windows
+              case .instance(let instance) = node
         else { return nil }
         return instance
+    }
+
+    /// Instancia Windows de la fila `row`, si lo es.
+    private func windowsInstance(atRow row: Int) -> InstanceInfo? {
+        instance(atRow: row).flatMap { $0.os == .windows ? $0 : nil }
     }
 
     @objc private func doubleClicked(_ sender: Any?) {
@@ -429,6 +439,15 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         originalMenuDelegate?.menuNeedsUpdate?(menu)
+        if onBrowseFiles != nil, let linux = instance(atRow: outline?.clickedRow ?? -1), linux.os == .linux,
+           let connectIndex = menu.items.firstIndex(where: { $0.title == ExplorerCommand.connect.title }) {
+            let browse = NSMenuItem(title: Self.browseFilesTitle, action: #selector(browseFromMenu(_:)), keyEquivalent: "")
+            browse.target = self
+            browse.representedObject = RdpMenuPayload(instance: linux)
+            browse.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil)
+            browse.toolTip = "Explorar ficheros por SFTP (misma sesión SSH)"
+            menu.insertItem(browse, at: connectIndex + 1)
+        }
         guard let instance = windowsInstance(atRow: outline?.clickedRow ?? -1),
               let connect = menu.items.first(where: { $0.title == ExplorerCommand.connect.title })
         else { return }
@@ -438,6 +457,10 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
         connect.isEnabled = true
         connect.badge = nil
         connect.toolTip = "Abrir RDP con Windows App vía IAP"
+    }
+
+    @objc private func browseFromMenu(_ sender: NSMenuItem) {
+        if let payload = sender.representedObject as? RdpMenuPayload { onBrowseFiles?(payload.instance) }
     }
 
     @objc private func connectFromMenu(_ sender: NSMenuItem) {

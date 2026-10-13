@@ -39,6 +39,8 @@ final class MemorySftpServer: SftpTransport, @unchecked Sendable {
     var cutAfterReads: Int?
     /// Máximo de bytes por DATA (lecturas cortas).
     var maxReadLength = Int.max
+    /// Respuesta a `REALPATH "."`.
+    var homeDirectory = "/"
     /// Entradas por READDIR.
     var pageSize = 100
     /// WRITE (índice desde 1) que responde PERMISSION_DENIED.
@@ -177,6 +179,15 @@ final class MemorySftpServer: SftpTransport, @unchecked Sendable {
             }
             guard let content = fs.files[path] else { return status(SftpStatus.noSuchFile, "No such file") }
             return SftpPacket.request(.attrs, id: id) { fileAttributes(size: content.count).encode(into: &$0) }.encoded()
+        case .realpath:
+            let path = try reader.text()
+            let resolved = path == "." ? homeDirectory : path
+            return SftpPacket.request(.name, id: id) {
+                $0.uint32(1)
+                $0.string(resolved)
+                $0.string("")
+                SftpAttributes().encode(into: &$0)
+            }.encoded()
         case .mkdir:
             let path = try reader.text()
             guard !fs.directories.contains(path), fs.files[path] == nil else { return status(SftpStatus.failure, "Failure") }
