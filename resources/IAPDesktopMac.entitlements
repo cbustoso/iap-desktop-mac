@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Entitlements para Developer ID + Hardened Runtime (GH-62, M4).
+      Paridad `docs/feature-parity.md` §13: "entitlements (cliente red
+      saliente, listener loopback, Keychain)". Mínimo necesario para que la
+      app firmada con Hardened Runtime siga funcionando: cada entitlement de
+      abajo tiene una razón concreta en el código, no se añade nada "por si
+      acaso" (Apple rechaza/marca apps con entitlements sin uso real).
+    -->
+
+    <!--
+      Hardened Runtime: permite que el proceso abra conexiones TCP salientes
+      (OAuth/Google APIs vía AuthKit/GCPClient, WebSocket IAP vía TunnelKit).
+      Sin esto, Hardened Runtime bloquea sockets de cliente.
+    -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!--
+      TunnelKit/IapListener abre un listener TCP en 127.0.0.1 (puerto
+      efímero) para que SSH/RDP/clientes arbitrarios se conecten en local y
+      el tráfico salga multiplexado por el WebSocket de IAP. Es un servidor
+      de red (aunque solo loopback), por eso hace falta el entitlement de
+      servidor además del de cliente.
+    -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!--
+      Hardened Runtime deshabilita por defecto el acceso a Keychain de otras
+      apps/herramientas firmadas con un Team ID distinto; el acceso al propio
+      Keychain del proceso (AuthKit.KeychainStore, SettingsStore,
+      KeychainHostKeyStore, credenciales RDP) sigue funcionando sin
+      entitlement adicional porque es el keychain del propio bundle ID. Este
+      entitlement documenta el grupo de acceso compartido entre el binario
+      suelto (debug, sin bundle) y la app firmada, usando el mismo
+      Keychain Access Group basado en Team ID (sustituir TEAMID por el
+      equipo real de la cuenta de Developer ID antes de firmar).
+    -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)com.iapdesktop.mac</string>
+    </array>
+
+    <!--
+      NO se incluyen (deliberado, revisar antes de añadir cualquiera):
+      - com.apple.security.app-sandbox: la app no corre en App Sandbox
+        (fuera del Mac App Store, distribución directa vía Developer ID +
+        notarización); si en el futuro se sandbox-ea, hay que revisar cada
+        entitlement de network/keychain con sus variantes sandboxed.
+      - com.apple.security.files.user-selected.read-write: SFTPKit aún no
+        necesita acceso a archivos fuera de rutas que el usuario elige por
+        NSOpenPanel/NSSavePanel (que no requieren entitlement sin sandbox).
+      - com.apple.security.device.*: no se usa cámara/micrófono/USB.
+    -->
+</dict>
+</plist>

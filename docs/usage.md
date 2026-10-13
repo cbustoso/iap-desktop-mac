@@ -277,3 +277,103 @@ no hay un botón "Reconnect" en la UI** (`TerminalUI`/pestaña de sesión) —
 la pestaña se queda sin más tráfico y hay que cerrarla y volver a conectar
 desde el Explorer. Ver `specs/ssh/design.md` y la tarea `T-SSH-6` (sin
 completar) para el diseño previsto de la reconexión manual end-to-end.
+
+## 11. Release: firma, notarización y DMG (GH-62, M4)
+
+Paridad `docs/feature-parity.md` §13: Developer ID + Hardened Runtime +
+notarización, Universal Binary (arm64+x86_64), DMG. El workflow
+`.github/workflows/release.yml` automatiza todo esto en tags `v*`; esta
+sección documenta qué hace y cómo reproducirlo en local.
+
+### 11.1 Qué dispara el release
+
+Un `git push` de un tag con el patrón `v*` (p. ej. `v0.4.0`) lanza el
+job `release` en un runner `macos-15`: build release Universal Binary →
+empaquetado `.app` → firma + notarización (`tools/sign-and-notarize.sh`) →
+DMG → artefacto adjunto a un **borrador** de GitHub Release
+(`draft: true`; revisar y publicar manualmente). Pushes a ramas normales o
+PRs **no** disparan este workflow (solo `ci.yml`, que no firma nada).
+
+### 11.2 Entitlements (`resources/IAPDesktopMac.entitlements`)
+
+Mínimo necesario para que la app firmada con Hardened Runtime siga
+funcionando, cada uno con una razón de uso concreta en el código:
+
+| Entitlement | Por qué |
+|---|---|
+| `com.apple.security.network.client` | Conexiones salientes: OAuth/Google APIs (`AuthKit`/`GCPClient`), WebSocket IAP (`TunnelKit`). |
+| `com.apple.security.network.server` | `IapListener` abre un listener TCP en `127.0.0.1` (puerto efímero) para SSH/RDP/clientes arbitrarios. |
+| `keychain-access-groups` | Acceso al Keychain del propio bundle ID (`AuthKit.KeychainStore`, `SettingsStore`, `KeychainHostKeyStore`, credenciales RDP). |
+
+La app **no** usa App Sandbox (distribución directa vía Developer ID, no
+Mac App Store); no se añaden entitlements de sandbox ni de dispositivos
+(cámara/micrófono/USB) porque no hay código que los use.
+
+### 11.3 Credenciales de firma/notarización: solo por entorno, nunca en el repo
+
+`tools/sign-and-notarize.sh` **nunca** acepta un certificado o contraseña
+como argumento ni los lee de un archivo del repo. Todo entra por variables
+de entorno que el propio script valida al arrancar (falla rápido si falta
+alguna):
+
+| Variable | Contenido |
+|---|---|
+| `DEVELOPER_ID_APPLICATION` | Identidad de firma exacta (`security find-identity -v -p codesigning`). |
+| `NOTARY_APPLE_ID` | Apple ID para notarytool (alternativa: `NOTARY_KEYCHAIN_PROFILE`). |
+| `NOTARY_TEAM_ID` | Team ID de Apple Developer. |
+| `NOTARY_PASSWORD` | **App-specific password**, nunca la contraseña normal del Apple ID. |
+| `NOTARY_KEYCHAIN_PROFILE` (opcional, uso local) | Nombre de un perfil ya guardado con `xcrun notarytool store-credentials`; sustituye a las tres variables de Apple ID/team/password. |
+
+En GitHub Actions estas credenciales viven como **repository/environment
+secrets** (`Settings → Secrets and variables → Actions`), nunca en el YAML
+ni en el historial de commits:
+
+- `DEVELOPER_ID_APPLICATION`
+- `DEVELOPER_ID_CERTIFICATE_P12_BASE64` (certificado `.p12` exportado de
+  Keychain Access, codificado en base64: `base64 -i Certificado.p12`)
+- `DEVELOPER_ID_CERTIFICATE_PASSWORD`
+- `KEYCHAIN_PASSWORD` (password arbitrario para el llavero temporal que
+  crea el runner; no es la contraseña de nada existente)
+- `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, `NOTARY_PASSWORD`
+
+El workflow importa el `.p12` a un llavero temporal del runner, firma,
+notariza y **borra el llavero al final** (paso `if: always()`), aunque el
+job falle a mitad de camino.
+
+### 11.4 Reproducir la firma en local (con certificado propio)
+
+Requiere tener ya un certificado **Developer ID Application** válido
+importado en el llavero local (Apple Developer Program):
+
+```bash
+tools/make-app-bundle.sh release
+
+export DEVELOPER_ID_APPLICATION="Developer ID Application: Tu Empresa (TEAMID)"
+# Opción A: perfil guardado una vez con notarytool (recomendado en local)
+xcrun notarytool store-credentials "iap-desktop-mac" \
+  --apple-id "tu@apple.id" --team-id TEAMID --password "app-specific-password"
+export NOTARY_KEYCHAIN_PROFILE="iap-desktop-mac"
+# Opción B: variables sueltas (equivalente a CI)
+# export NOTARY_APPLE_ID=... NOTARY_TEAM_ID=... NOTARY_PASSWORD=...
+
+tools/sign-and-notarize.sh
+```
+
+Resultado: `dist/IAPDesktopMac.app` firmado+stapled y `dist/IAPDesktopMac.dmg`.
+Sin certificado real, el script falla rápido en el primer `codesign` (o
+antes, si falta alguna variable de entorno) — no hay modo "simulado".
+
+### 11.5 Troubleshooting del release
+
+- **`security: SecKeychainItemImport: ... MAC verification failed`**: el
+  `.p12` o su password no coinciden; regenera el base64 del certificado
+  (`base64 -i Certificado.p12 | pbcopy`) y actualiza el secret.
+- **`notarytool submit` falla con `Invalid credentials`**: `NOTARY_PASSWORD`
+  debe ser un *app-specific password* (appleid.apple.com → Seguridad →
+  Contraseñas específicas de app), no la contraseña normal del Apple ID.
+- **`The signature does not include a secure timestamp`**: falta red
+  durante `codesign --timestamp` (necesita contactar los servidores de
+  Apple); reintentar con conectividad.
+- **DMG se genera pero Gatekeeper sigue bloqueando**: falta el `xcrun
+  stapler staple` (paso 5 del script) o la notarización no llegó a
+  `Accepted`; revisa el log con `xcrun notarytool log <submission-id>`.

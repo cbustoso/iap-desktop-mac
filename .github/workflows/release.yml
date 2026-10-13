@@ -1,0 +1,103 @@
+name: Release
+
+# GH-62 (M4): build Universal Binary release, firma Developer ID + Hardened
+# Runtime, notarización (notarytool) y DMG. Solo corre en tags "v*"
+# (paridad docs/feature-parity.md §13: "firma/notarización en tags").
+#
+# Credenciales de firma/notarización SOLO vía GitHub Secrets, nunca en este
+# archivo ni en el repo. Secrets esperados (ver docs/usage.md "Release"):
+#   DEVELOPER_ID_APPLICATION   Identidad de firma (nombre completo del cert).
+#   DEVELOPER_ID_CERTIFICATE_P12_BASE64   Certificado .p12 en base64.
+#   DEVELOPER_ID_CERTIFICATE_PASSWORD     Password del .p12.
+#   KEYCHAIN_PASSWORD          Password para el llavero temporal del runner.
+#   NOTARY_APPLE_ID / NOTARY_TEAM_ID / NOTARY_PASSWORD
+#     (app-specific password, nunca la contraseña normal del Apple ID).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.app/Contents/Developer || true; swift --version
+
+      - name: Cache SPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-release-${{ hashFiles('Package.swift') }}
+
+      - name: Build release (arm64 + x86_64)
+        run: |
+          swift build -c release --arch arm64 --arch x86_64
+          mkdir -p dist/universal
+          lipo -create \
+            .build/apple/Products/Release/App \
+            -output dist/universal/App 2>/dev/null \
+            || cp .build/release/App dist/universal/App
+          lipo -info dist/universal/App || true
+
+      - name: Package .app bundle
+        run: |
+          APP="dist/IAPDesktopMac.app"
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp dist/universal/App "$APP/Contents/MacOS/App"
+          cp resources/Info.plist "$APP/Contents/Info.plist"
+          echo "OK: $APP"
+
+      - name: Import Developer ID certificate into temporary keychain
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/release-signing.keychain-db"
+          CERTIFICATE_PATH="$RUNNER_TEMP/developer-id.p12"
+
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode -o "$CERTIFICATE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$CERTIFICATE_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+          rm -f "$CERTIFICATE_PATH"
+
+      - name: Sign, notarize and build DMG
+        env:
+          DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
+          NOTARY_APPLE_ID: ${{ secrets.NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.NOTARY_PASSWORD }}
+        run: tools/sign-and-notarize.sh dist/IAPDesktopMac.app
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: IAPDesktopMac-${{ github.ref_name }}
+          path: dist/IAPDesktopMac.dmg
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/IAPDesktopMac.dmg
+          draft: true
+          generate_release_notes: true
+
+      - name: Remove temporary keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/release-signing.keychain-db"
+          security delete-keychain "$KEYCHAIN_PATH" || true
