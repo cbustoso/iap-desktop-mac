@@ -2,6 +2,7 @@ import AppKit
 import AuthKit
 import OSLog
 import RDPBridge
+import SFTPKit
 import ExplorerUI
 import GCPClient
 import SSHKit
@@ -93,6 +94,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             note: { [weak self] in self?.windowController?.statusNote = $0 })
     }()
     private var windowsConnect: WindowsConnectInterposer?
+    /// GH-60: pestañas "Files" (SFTP) por instancia Linux.
+    private var sftpBrowsers: SftpBrowsers?
 
     static func main() {
         let app = NSApplication.shared
@@ -344,6 +347,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Session: conexión llega en M1 (SSH) / M2 (RDP); sin acción → deshabilitado.
         mainMenu.addItem(submenu("Session", [
             connectItem(),
+            browseFilesItem(),
             serialOutputItem(),
             eventLogItem(),
             pending("Connect as user…", milestone: "M2"),
@@ -440,6 +444,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.showWindow(sender)
     }
 
+    private func browseFilesItem() -> NSMenuItem {
+        let menuItem = item(WindowsConnectInterposer.browseFilesTitle, #selector(browseSelectedFiles(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
     @objc private func connectSelected(_ sender: Any?) {
         if let instance = viewModel.selection, instance.os == .windows {
             rdpFlow.connect(instance)
@@ -461,6 +471,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let tabs = TerminalTabManager(host: windowController.sessionTabs)
         tabs.onSessionEnded = { [weak self] instanceID in
             guard let session = self?.sshSessions.removeValue(forKey: instanceID) else { return }
+            // GH-60: si la pestaña Files la comparte, ella la cierra al terminar.
+            if self?.sftpBrowsers?.isUsing(session) == true { return }
             Task { await session.close() }
         }
         terminalTabs = tabs
@@ -475,6 +487,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.rdpFlow.connect(instance)
         }
         if windowsConnect == nil { RdpConnectFlow.log.error("rdp hookup failed: outline not found") }
+        wireSftpBrowse()
+    }
+
+    /// GH-60: "Browse files…" (menú contextual y Session) → pestaña Files.
+    private func wireSftpBrowse() {
+        guard let windowController else { return }
+        let browsers = SftpBrowsers(
+            host: windowController.sessionTabs,
+            terminalSession: { [weak self] in self?.sshSessions[$0.id] },
+            connect: { [weak self] instance in
+                guard let self else { throw SshSessionError.sessionClosed }
+                guard await self.credentialFacade.currentEmail != nil else {
+                    self.showLoginWindow(nil)
+                    throw SshSessionError.sessionClosed
+                }
+                return try await self.sshConnector.connect(
+                    to: SshTarget(project: instance.project, zone: instance.zone, instance: instance.name))
+            },
+            onFailure: { [weak self] error, instance in
+                let failure = error is SftpError
+                    ? ConnectionFailure(message: "No se pudo abrir el explorador SFTP.", helpTopic: nil)
+                    : ConnectionFailure(error)
+                self?.presentConnectionFailure(failure, instance: instance)
+            })
+        browsers.isTerminalSession = { [weak self] session in
+            self?.sshSessions.values.contains { $0 === session } ?? false
+        }
+        sftpBrowsers = browsers
+        windowsConnect?.onBrowseFiles = { [weak browsers] in browsers?.browse($0) }
+    }
+
+    @objc private func browseSelectedFiles(_ sender: Any?) {
+        guard let instance = viewModel.selection, instance.os == .linux else { return }
+        sftpBrowsers?.browse(instance)
     }
 
     private func wireVmControl() {
