@@ -1,13 +1,13 @@
 # Spec SFTP — tasks (→ issues Linear)
 
-- [ ] T-SFTP-1 Spike protocolo: framing SFTP v3 propio sobre `SshDataChannel` vs
+- [x] T-SFTP-1 Spike protocolo: framing SFTP v3 propio sobre `SshDataChannel` vs
       Citadel (tabla design.md); verificar si Citadel puede operar sobre una
       `SshSession` ya autenticada sin duplicar conexión. Entregable:
       `specs/sftp/transport-decision.md` (formato `specs/ssh/transport-decision.md`).
       Depende de: nada (usa `SSHKit` ya entregado, T-SSH-4). Criterio: decisión
       registrada antes de T-SFTP-2; si Citadel no puede reusar la conexión, se
       descarta sin más análisis. → REQ-2
-- [ ] T-SFTP-2 `SftpPacket`/`SftpRequestTable`/`SftpAttributes` (framing, pipelining
+- [x] T-SFTP-2 `SftpPacket`/`SftpRequestTable`/`SftpAttributes` (framing, pipelining
       por `request-id`, traducción de `ATTRS`) + `SftpChannel.open(over:)`
       (INIT/VERSION). Depende de: T-SFTP-1. Test: encode/decode con vectores conocidos
       de OpenSSH; respuestas fuera de orden resueltas al `request-id` correcto.

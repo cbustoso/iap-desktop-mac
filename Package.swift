@@ -42,7 +42,9 @@ let package = Package(
                 "SSHKit",  // SshChannel como backend del terminal
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]),
-        .target(name: "SFTPKit"),
+        // Framing SFTP v3 propio sobre la SshSession ya autenticada (GH-55,
+        // specs/sftp/transport-decision.md): sin dependencia externa nueva.
+        .target(name: "SFTPKit", dependencies: ["SSHKit"]),
         .target(name: "RDPBridge"),
         .target(name: "SettingsStore"),
         .target(name: "ExplorerUI", dependencies: ["GCPClient"]),
@@ -76,6 +78,16 @@ let package = Package(
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
         .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
         .testTarget(name: "RDPBridgeTests", dependencies: ["RDPBridge"]),
+        .testTarget(
+            name: "SFTPKitTests",
+            dependencies: [
+                "SFTPKit",
+                "SSHKit",
+                "TunnelKit",
+                "IAPTestSupport",
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]),
         .testTarget(name: "ExplorerUITests", dependencies: ["ExplorerUI"]),
         .testTarget(
             name: "TerminalUITests",
