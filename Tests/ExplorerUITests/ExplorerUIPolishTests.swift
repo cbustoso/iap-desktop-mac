@@ -73,7 +73,10 @@ struct ContextMenuTests {
             if case .command(let command) = entry { return command.title }
             return nil
         }
-        #expect(titles == ["Connect", "Connect as user…", "Connection settings…", "Refresh project", "Properties"])
+        #expect(titles == [
+            "Connect", "Connect as user…", "Connection settings…", "Software packages",
+            "Refresh project", "Properties",
+        ])
     }
 
     @Test func connectionCommandsDisabledWithMilestone() {

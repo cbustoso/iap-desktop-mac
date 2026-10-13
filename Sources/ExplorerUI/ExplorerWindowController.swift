@@ -63,6 +63,8 @@ public final class ExplorerWindowController: NSWindowController {
     /// "Generate Windows credentials…" en una instancia Windows (CBU-54): la App
     /// resetea la contraseña vía GCE y la guarda en Keychain, sin conectar.
     public var onGenerateWindowsCredentialsRequest: (@MainActor (InstanceInfo) -> Void)?
+    /// Abre el inventario de una VM o el agregado Linux de una zona.
+    public var onSoftwarePackagesRequest: (@MainActor (InventoryScope) -> Void)?
     /// La App aporta la persistencia; ExplorerUI solo comunica el nivel seleccionado.
     public var onOpenSettings: (@MainActor (SettingsPanelScope?) -> Void)?
     let propertiesPane = PropertiesView()
@@ -324,6 +326,12 @@ public final class ExplorerWindowController: NSWindowController {
             if case .instance(let instance) = payload.node, instance.os == .windows {
                 onGenerateWindowsCredentialsRequest?(instance)
             }
+        case .softwarePackages:
+            switch payload.node {
+            case .instance(let instance): onSoftwarePackagesRequest?(.instance(instance))
+            case .zone(let zone): onSoftwarePackagesRequest?(.zone(zone))
+            case .cloud, .project: break
+            }
         case .connect, .connectAsUser, .connectionSettings:
             showStub(title: payload.command.title, milestone: payload.command.milestone ?? "M2")
         case .refreshProject:
@@ -515,14 +523,16 @@ extension ExplorerWindowController: NSMenuDelegate {
         for menuItem in Self.contextMenuItems(
             for: item.node, target: self, sshConnectAvailable: onConnectRequest != nil,
             vmControlAvailable: onVmControlRequest != nil,
-            windowsCredentialsAvailable: onGenerateWindowsCredentialsRequest != nil) {
+            windowsCredentialsAvailable: onGenerateWindowsCredentialsRequest != nil,
+            softwarePackagesAvailable: onSoftwarePackagesRequest != nil) {
             menu.addItem(menuItem)
         }
     }
 
     static func contextMenuItems(
         for node: ExplorerNode, target: AnyObject?, sshConnectAvailable: Bool = false,
-        vmControlAvailable: Bool = false, windowsCredentialsAvailable: Bool = false
+        vmControlAvailable: Bool = false, windowsCredentialsAvailable: Bool = false,
+        softwarePackagesAvailable: Bool = false
     ) -> [NSMenuItem] {
         var items: [NSMenuItem] = []
         if case .instance(let instance) = node, vmControlAvailable {
@@ -551,6 +561,11 @@ extension ExplorerWindowController: NSMenuDelegate {
                 if command == .generateWindowsCredentials {
                     item.isEnabled = windowsCredentialsAvailable
                     item.toolTip = "Crear o resetear un usuario Windows y guardarlo en el llavero"
+                    return item
+                }
+                if command == .softwarePackages {
+                    item.isEnabled = softwarePackagesAvailable
+                    item.toolTip = "Guest inventory from Compute guest attributes"
                     return item
                 }
                 item.isEnabled = command.isAvailable
