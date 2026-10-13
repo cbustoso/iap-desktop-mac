@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
     private lazy var vmClient = GCPClient(tokenProvider: accessToken)
     private var serialOutputPanels: [String: SerialOutputWindowController] = [:]
+    private var eventLogPanels: [String: EventLogWindowController] = [:]
 
     /// Token OAuth de la sesión activa (refresh automático vía fachada).
     /// Compartido por Compute, OS Login y el túnel IAP; nunca se registra.
@@ -344,6 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenu("Session", [
             connectItem(),
             serialOutputItem(),
+            eventLogItem(),
             pending("Connect as user…", milestone: "M2"),
             pending("Connection settings…", milestone: "M2"),
         ]))
@@ -400,6 +402,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuItem = item("Show serial port output", #selector(showSerialPortOutput(_:)))
         menuItem.target = self
         return menuItem
+    }
+
+    private func eventLogItem() -> NSMenuItem {
+        let menuItem = item("Show event log", #selector(showEventLog(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func showEventLog(_ sender: Any?) {
+        guard let instance = viewModel.selection else {
+            let alert = NSAlert()
+            alert.messageText = "Show event log"
+            alert.informativeText = "Selecciona una instancia en Project Explorer."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        let panel = eventLogPanels[instance.id]
+            ?? EventLogWindowController(instance: instance, client: vmClient)
+        eventLogPanels[instance.id] = panel
+        panel.showWindow(sender)
     }
 
     @objc private func showSerialPortOutput(_ sender: Any?) {
