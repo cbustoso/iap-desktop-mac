@@ -12,4 +12,8 @@ public protocol SessionTabHosting: AnyObject {
     func setSessionTitle(_ title: String, identifier: String)
     var sessionIdentifiers: [String] { get }
     var selectedSessionIdentifier: String? { get }
+    /// GH-64 (REQ-CLOSE-1): el usuario pulsó el `×` de la pestaña `identifier`.
+    /// El área no cierra nada por sí misma: la App decide (confirmación, tipo
+    /// de pestaña) y llama a `closeSession` si procede. `nil` = sin `×`.
+    var onCloseRequested: (@MainActor (String) -> Void)? { get set }
 }

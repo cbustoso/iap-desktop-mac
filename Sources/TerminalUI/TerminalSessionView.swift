@@ -19,6 +19,14 @@ public final class TerminalSessionView: NSView {
     public var onEnded: (@MainActor () -> Void)?
     /// Título OSC fijado por el shell remoto (p. ej. `user@host: ~`).
     public var onTitleChange: (@MainActor (String) -> Void)?
+    /// GH-64 (REQ-CLOSE-3.2): cuándo llegó la última salida remota y cuándo el
+    /// usuario pulsó Enter sobre una línea vacía. Solo marcas de tiempo, nunca
+    /// contenido; las usa `SessionCloseConfirmer` (heurística aproximada).
+    public internal(set) var lastOutputAt: Date?
+    public internal(set) var lastEmptyEnterAt: Date?
+    private var typedSinceEnter = false
+    /// `TerminalTabManager` ya notificó el fin de esta pestaña.
+    var endNotified = false
 
     private let backend: any TerminalBackend
     private let outbound: AsyncStream<Outbound>.Continuation
@@ -64,6 +72,7 @@ public final class TerminalSessionView: NSView {
         let output = backend.output
         feeder = Task { [weak self] in
             for await text in output {
+                self?.lastOutputAt = Date()
                 self?.terminalView.feed(text: text)
             }
             self?.markEnded()
@@ -84,6 +93,19 @@ public final class TerminalSessionView: NSView {
         markEnded()
     }
 
+    /// Enter (CR) sin nada tecleado desde el anterior = "línea vacía": la salida
+    /// que siga es el prompt, no un comando en curso.
+    func noteInput(_ data: ArraySlice<UInt8>) {
+        for byte in data {
+            if byte == 0x0d || byte == 0x0a {
+                if !typedSinceEnter { lastEmptyEnterAt = Date() }
+                typedSinceEnter = false
+            } else {
+                typedSinceEnter = true
+            }
+        }
+    }
+
     private func markEnded() {
         guard !hasEnded else { return }
         hasEnded = true
@@ -97,6 +119,7 @@ public final class TerminalSessionView: NSView {
 extension TerminalSessionView: @preconcurrency TerminalViewDelegate {
     public func send(source: TerminalView, data: ArraySlice<UInt8>) {
         guard !hasEnded else { return }
+        noteInput(data)
         outbound.yield(.data(Array(data)))
     }
 

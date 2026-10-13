@@ -185,4 +185,11 @@ final class SftpBrowsers {
     func closeAll() {
         for tab in Array(open.keys) { close(tab) }
     }
+
+    /// GH-64: ¿la pestaña Files de `instanceID` tiene una transferencia en curso?
+    func hasActiveTransfer(instanceID: String) -> Bool {
+        open["\(instanceID)#files"]?.controller.viewModel.transfers.contains { $0.state == .transferring } ?? false
+    }
+
+    func isFilesTab(_ identifier: String) -> Bool { open[identifier] != nil }
 }
