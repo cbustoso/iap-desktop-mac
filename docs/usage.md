@@ -123,65 +123,86 @@ implementación.
   xattr -dr com.apple.quarantine dist/IAPDesktopMac.app
   ```
 
-## 7. Client ID OAuth: login directo sin pegar nada
+## 7. Client OAuth: sin secretos en el repo (GH-80)
 
-Como el IAP Desktop original (que trae su propio client ID), **Sign in abre
-el navegador directamente**: el usuario no tiene que crear ni pegar nada si
-el build lleva un client ID embebido.
+El repo **no lleva client ID ni client secret**: `resources/Info.plist` solo
+tiene los placeholders `__OAUTH_CLIENT_ID__` y `__OAUTH_CLIENT_SECRET__`, que
+cuentan como "no configurado". Cada desarrollador o usuario aporta su propio
+cliente OAuth de tipo **Desktop app**, por el entorno o con un fichero local.
 
 ### Orden de resolución (`ClientIDStore`)
 
-1. **Override manual** (`UserDefaults`, clave `oauth.clientID`): el enlace
-   discreto *Use a different OAuth client…* de la ventana Sign In muestra el
-   campo, ya rellenado con el valor en uso. Guardarlo vacío borra el
-   override y vuelve al valor por defecto.
-2. **`Info.plist` → `OAuthClientID`**: el valor por defecto del build. Con el
-   placeholder `__OAUTH_CLIENT_ID__` (o vacío) cuenta como ausente.
-3. **Variable de entorno `GOOGLE_OAUTH_CLIENT_ID`**: para desarrollo.
+1. **Override manual** (`UserDefaults`, clave `oauth.clientID`, por perfil):
+   el enlace *Use a different OAuth client…* de la ventana Sign In. Solo el
+   client ID; guardarlo vacío borra el override.
+2. **`Info.plist`** (`OAuthClientID` / `OAuthClientSecret`): solo si un build
+   de distribución los inyecta al empaquetar. Los placeholders cuentan como
+   ausentes. **Nunca se commitean valores reales.**
+3. **Variables de entorno** `GOOGLE_OAUTH_CLIENT_ID` y
+   `GOOGLE_OAUTH_CLIENT_SECRET`.
+4. **Fichero local** `~/.config/iap-desktop-mac/secrets.env` (o
+   `$XDG_CONFIG_HOME/iap-desktop-mac/secrets.env`), leído **solo si existe**.
+   El entorno manda sobre el fichero, clave a clave.
 
-Si no hay ninguno, la ventana Sign In muestra el campo y un mensaje con
-enlace a Google Cloud Console. Pulsar *Sign in* con el valor ya resuelto
-**no** lo guarda como override, así que una actualización del client ID
-embebido sigue aplicando a quien no haya puesto uno propio.
+Si falta el client ID, la app no falla: la ventana Sign In muestra el campo y
+un enlace a Google Cloud Console, y los refresh fallan con un mensaje que dice
+qué variables o fichero configurar. `ClientIDStore.missingConfiguration`
+distingue si falta el client ID o solo el secret.
 
-### Embeber el client ID (maintainer, una sola vez)
+### Crear tu cliente OAuth
 
 1. En [Google Cloud Console → Credentials](https://console.cloud.google.com/apis/credentials)
    (Google Auth Platform → Clients) crea un cliente OAuth de tipo
    **Desktop app**. Si el proyecto aún no tiene pantalla de consentimiento,
    configúrala antes (scopes `cloud-platform`, `openid` y `email`).
-2. Copia el **client ID** (`123456789-abc….apps.googleusercontent.com`) y,
-   solo si tu cliente lo exige en `/token` (algunas configuraciones devuelven
-   `invalid_request: client_secret is missing`), también el **client secret**.
-3. Pon ambos en `resources/Info.plist`:
+2. Copia el **client ID** (`<número>-<id>.apps.googleusercontent.com`) y el
+   **client secret** (los clientes Desktop de Google lo piden en `/token`).
 
-   ```xml
-   <key>OAuthClientID</key>
-   <string>123456789-abc….apps.googleusercontent.com</string>
-   <key>OAuthClientSecret</key>
-   <string>GOCSPX-…</string>
-   ```
+### Opción A: variables de entorno
 
-   El secret viaja en `TokenClient` (canje y refresh) y nunca en logs: hay
-   tests de redacción que lo garantizan.
+```bash
+export GOOGLE_OAUTH_CLIENT_ID="YOUR_CLIENT_ID.apps.googleusercontent.com"
+export GOOGLE_OAUTH_CLIENT_SECRET="YOUR_CLIENT_SECRET"
+swift run App   # o .build/debug/App
+```
 
-4. Genera el bundle con `tools/make-app-bundle.sh`: el script copia ese
-   `Info.plist` dentro de `dist/IAPDesktopMac.app`.
+Una app abierta desde Finder (`open dist/IAPDesktopMac.app`) **no hereda** las
+variables de tu shell: para el `.app` usa la opción B.
 
-**Usa siempre un cliente propio.** No embebas el client ID de otra
-aplicación, aunque sea público (p. ej. el del IAP Desktop de Google, que su
-documentación publica para que los administradores de Workspace lo
-identifiquen): la pantalla de consentimiento y la consola de administración
-mostrarían esa otra app como titular de los tokens, que en realidad recibe
-este programa, y la confianza que un administrador haya dado a esa app se
-aplicaría sin saberlo a esta.
+### Opción B: fichero local (recomendada para el `.app`)
 
-El client ID de una app instalada **no es secreto** (Google lo indica así:
-el cliente no puede mantener confidencial nada embebido), por eso puede ir
-en el `Info.plist`. El client secret embebido **sí es extraíble del bundle**:
-solo debe ser el del dueño para su propio uso; si se expone, genera otro en
-Cloud Console y sustitúyelo (un test verifica que se resuelve y que nunca
-aparece en descripciones/logs).
+```bash
+mkdir -p ~/.config/iap-desktop-mac
+cat > ~/.config/iap-desktop-mac/secrets.env <<'ENV'
+# Cliente OAuth "Desktop app" propio. Este fichero NO está en el repo.
+GOOGLE_OAUTH_CLIENT_ID=YOUR_CLIENT_ID.apps.googleusercontent.com
+GOOGLE_OAUTH_CLIENT_SECRET=YOUR_CLIENT_SECRET
+ENV
+chmod 600 ~/.config/iap-desktop-mac/secrets.env
+```
+
+Formato `CLAVE=valor` por línea; admite `#` como comentario, el prefijo
+`export ` y comillas. Solo se leen esas dos claves; las demás se ignoran.
+Por seguridad **se ignora el fichero si otros usuarios pueden modificarlo**
+(permisos de escritura de grupo u otros): alguien podría poner su propio
+cliente OAuth. Los valores nunca aparecen en logs; el log solo dice qué
+claves se cargaron.
+
+El fichero vive fuera del repo, así que no se puede commitear por accidente.
+No lo copies dentro del árbol del proyecto.
+
+### Si un secret se expone
+
+El client secret de una app instalada es extraíble de cualquier binario que
+lo lleve, y un valor que estuvo commiteado sigue en el historial de git
+aunque se borre después. Si eso pasa, **genera otro secret en Cloud Console
+y revoca el anterior**; borrarlo del repo no basta.
+
+**Usa siempre un cliente propio.** No uses el client ID de otra aplicación,
+aunque sea público (p. ej. el del IAP Desktop de Google): la pantalla de
+consentimiento y la consola de administración mostrarían esa otra app como
+titular de los tokens, y la confianza que un administrador le haya dado se
+aplicaría sin saberlo a este programa.
 
 ### PKCE con `client_secret` opcional
 
@@ -190,14 +211,13 @@ loopback. En la [documentación de Google para apps
 instaladas](https://developers.google.com/identity/protocols/oauth2/native-app),
 `client_secret` figura como **opcional** tanto en el canje del código
 (`/token` con `code_verifier`) como en el refresh: `TokenClient` solo lo
-envía cuando está configurado (Info.plist o `GOOGLE_OAUTH_CLIENT_SECRET`).
+envía cuando está configurado (entorno, `secrets.env` o un `Info.plist` de distribución).
 
 ### Limitaciones a tener en cuenta
 
-- **Solo el `.app` lee el `Info.plist`.** El binario suelto
-  `.build/debug/App` (y `tools/snapshot.sh`) no tiene `Info.plist`: ahí el
-  client ID embebido no existe y hay que exportar
-  `GOOGLE_OAUTH_CLIENT_ID` o usar el override de la ventana Sign In.
+- **Entorno y `.app`.** El binario suelto `.build/debug/App` (y
+  `tools/snapshot.sh`) hereda las variables de la shell; el `.app` abierto
+  desde Finder no, y por eso para él va mejor `secrets.env`.
 - **App no verificada por Google.** A diferencia del original (cliente de
   Google, verificado), un cliente propio con usuarios externos muestra el
   aviso "Google hasn't verified this app" y, en modo *Testing*, solo

@@ -35,9 +35,13 @@
       https://console.cloud.google.com/apis/credentials y sustitúyelos aquí.
       No añadir client secret de otros ni commitear este fichero a repos públicos.
     -->
+    <!-- GH-80: sin secretos en el repo. Placeholders = "no configurado":
+         el client OAuth se toma de GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
+         o de ~/.config/iap-desktop-mac/secrets.env (docs/usage.md). Un build de
+         distribución puede inyectarlos al empaquetar; nunca se commitean. -->
     <key>OAuthClientID</key>
-    <string>YOUR-CLIENT-ID.apps.googleusercontent.com</string>
+    <string>__OAUTH_CLIENT_ID__</string>
     <key>OAuthClientSecret</key>
-    <string>GOCSPX-PLACEHOLDER-ROTATE-ME</string>
+    <string>__OAUTH_CLIENT_SECRET__</string>
 </dict>
 </plist>

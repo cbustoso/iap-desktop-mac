@@ -6,7 +6,7 @@ import Testing
 struct ClientIDStoreTests {
     @Test func acceptsAndNormalizesGoogleClientID() throws {
         try withDefaults { defaults in
-            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:], secretsFile: nil)
             let clientID = "123-example.apps.googleusercontent.com"
 
             let saved = try store.save("  \(clientID)\n")
@@ -18,7 +18,7 @@ struct ClientIDStoreTests {
 
     @Test func rejectsInvalidClientID() throws {
         try withDefaults { defaults in
-            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:], secretsFile: nil)
 
             #expect(throws: AuthError.invalidResponse) {
                 try store.save("not-a-google-client-id")
@@ -33,7 +33,7 @@ struct ClientIDStoreTests {
             let store = ClientIDStore(
                 defaults: defaults,
                 bundledClientID: nil,
-                environment: [ClientIDStore.environmentKey: environment])
+                environment: [ClientIDStore.environmentKey: environment], secretsFile: nil)
 
             try store.save(stored)
 
@@ -48,11 +48,11 @@ struct ClientIDStoreTests {
             let configuredStore = ClientIDStore(
                 defaults: defaults,
                 bundledClientID: nil,
-                environment: [ClientIDStore.environmentKey: environment])
+                environment: [ClientIDStore.environmentKey: environment], secretsFile: nil)
             let resolved = try configuredStore.resolve()
             #expect(resolved == environment)
 
-            let missingStore = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:])
+            let missingStore = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:], secretsFile: nil)
             #expect(throws: AuthError.userCancelled) {
                 try missingStore.resolve()
             }
@@ -62,7 +62,7 @@ struct ClientIDStoreTests {
     @Test func descriptionsRedactClientID() throws {
         try withDefaults { defaults in
             let clientID = "secret-client.apps.googleusercontent.com"
-            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:], secretsFile: nil)
             try store.save(clientID)
 
             let description = String(describing: store)
@@ -85,7 +85,7 @@ struct ClientIDStoreTests {
         try withDefaults { defaults in
             let environment = [ClientIDStore.environmentKey: Self.fromEnvironment]
             let store = ClientIDStore(
-                defaults: defaults, bundledClientID: Self.bundled, environment: environment)
+                defaults: defaults, bundledClientID: Self.bundled, environment: environment, secretsFile: nil)
             let value1 = try store.resolve()
             #expect(value1 == Self.bundled)  // bundle > entorno
 
@@ -94,7 +94,7 @@ struct ClientIDStoreTests {
             #expect(value2 == Self.override)  // override > bundle
 
             let noBundle = ClientIDStore(
-                defaults: defaults, bundledClientID: nil, environment: environment)
+                defaults: defaults, bundledClientID: nil, environment: environment, secretsFile: nil)
             noBundle.clearOverride()
             let value3 = try noBundle.resolve()
             #expect(value3 == Self.fromEnvironment)
@@ -106,11 +106,11 @@ struct ClientIDStoreTests {
         try withDefaults { defaults in
             let withEnvironment = ClientIDStore(
                 defaults: defaults, bundledClientID: bundleValue,
-                environment: [ClientIDStore.environmentKey: Self.fromEnvironment])
+                environment: [ClientIDStore.environmentKey: Self.fromEnvironment], secretsFile: nil)
             let value4 = try withEnvironment.resolve()
             #expect(value4 == Self.fromEnvironment)
 
-            let nothing = ClientIDStore(defaults: defaults, bundledClientID: bundleValue, environment: [:])
+            let nothing = ClientIDStore(defaults: defaults, bundledClientID: bundleValue, environment: [:], secretsFile: nil)
             #expect(!nothing.isConfigured)
             #expect(throws: AuthError.userCancelled) { try nothing.resolve() }
         }
@@ -121,14 +121,14 @@ struct ClientIDStoreTests {
         try withDefaults { defaults in
             let store = ClientIDStore(
                 defaults: defaults, bundledClientID: "not-a-client-id",
-                environment: [ClientIDStore.environmentKey: Self.fromEnvironment])
+                environment: [ClientIDStore.environmentKey: Self.fromEnvironment], secretsFile: nil)
             #expect(throws: AuthError.invalidResponse) { try store.resolve() }
         }
     }
 
     @Test func signInWithDefaultDoesNotPinItAsOverride() throws {
         try withDefaults { defaults in
-            let store = ClientIDStore(defaults: defaults, bundledClientID: Self.bundled, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: Self.bundled, environment: [:], secretsFile: nil)
             // Campo vacío o con el mismo valor ya resuelto: login directo sin guardar.
             let value5 = try store.clientIDForSignIn(fieldValue: "")
             #expect(value5 == Self.bundled)
@@ -138,7 +138,7 @@ struct ClientIDStoreTests {
 
             // Un maintainer actualiza el default: se aplica porque no se fijó override.
             let updated = ClientIDStore(
-                defaults: defaults, bundledClientID: "updated.apps.googleusercontent.com", environment: [:])
+                defaults: defaults, bundledClientID: "updated.apps.googleusercontent.com", environment: [:], secretsFile: nil)
             let value7 = try updated.resolve()
             #expect(value7 == "updated.apps.googleusercontent.com")
         }
@@ -146,7 +146,7 @@ struct ClientIDStoreTests {
 
     @Test func signInWithDifferentValueSavesOverride() throws {
         try withDefaults { defaults in
-            let store = ClientIDStore(defaults: defaults, bundledClientID: Self.bundled, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: Self.bundled, environment: [:], secretsFile: nil)
             let value8 = try store.clientIDForSignIn(fieldValue: Self.override)
             #expect(value8 == Self.override)
             #expect(defaults.string(forKey: ClientIDStore.defaultsKey) == Self.override)
@@ -158,14 +158,14 @@ struct ClientIDStoreTests {
 
     @Test func signInWithoutAnyClientIDThrowsMissing() throws {
         try withDefaults { defaults in
-            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: nil, environment: [:], secretsFile: nil)
             #expect(throws: AuthError.userCancelled) { try store.clientIDForSignIn(fieldValue: "") }
         }
     }
 
     @Test func clearOverrideFallsBackToBundledDefault() throws {
         try withDefaults { defaults in
-            let store = ClientIDStore(defaults: defaults, bundledClientID: Self.bundled, environment: [:])
+            let store = ClientIDStore(defaults: defaults, bundledClientID: Self.bundled, environment: [:], secretsFile: nil)
             try store.save(Self.override)
             store.clearOverride()
             let value9 = try store.resolve()
@@ -180,35 +180,28 @@ struct ClientIDStoreTests {
         #expect(url.path == "/apis/credentials")
     }
 
-    @Test func shippedInfoPlistDeclaresClientIDKey() throws {
-        // La clave debe existir con el placeholder documentado o con un
-        // client ID bien formado (lo que ponga el maintainer).
+    /// GH-80: el `Info.plist` del repo no lleva client ID ni secret reales.
+    @Test func shippedInfoPlistHasOnlyPlaceholders() throws {
         let plist = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("resources/Info.plist")
         let data = try Data(contentsOf: plist)
         let dictionary = try #require(
             try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
-        let value = try #require(dictionary[ClientIDStore.infoPlistKey] as? String)
-        #expect(value == ClientIDStore.bundlePlaceholder || value.hasSuffix(".apps.googleusercontent.com"))
+        #expect(dictionary[ClientIDStore.infoPlistKey] as? String == ClientIDStore.bundlePlaceholder)
+        #expect(dictionary[ClientIDStore.secretPlistKey] as? String == ClientIDStore.secretBundlePlaceholder)
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(!text.contains("GOCSPX"))
+        #expect(!text.contains(".apps.googleusercontent.com"))
     }
 
-    @Test func shippedInfoPlistSecretIsDocumented() throws {
-        // El dueño aportó su client secret para que el login funcione sin
-        // setup (CBU-45). Si existe, debe resolverse vía clientSecret() y
-        // NUNCA aparecer en descripciones/logs (ver test de redacción).
-        let plist = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("resources/Info.plist")
-        let data = try Data(contentsOf: plist)
-        let dictionary = try #require(
-            try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
-        if let secret = dictionary[ClientIDStore.secretPlistKey] as? String {
+    @Test func bundlePlaceholdersCountAsMissing() throws {
+        try withDefaults { defaults in
             let store = ClientIDStore(
-                bundledClientID: nil, bundledClientSecret: secret, environment: [:])
-            #expect(store.clientSecret() == secret)
-            #expect(!store.description.contains(secret))
-            #expect(!store.debugDescription.contains(secret))
+                defaults: defaults, bundledClientID: ClientIDStore.bundlePlaceholder,
+                bundledClientSecret: ClientIDStore.secretBundlePlaceholder, environment: [:], secretsFile: nil)
+            #expect(store.clientSecret() == nil)
+            #expect(!store.isConfigured)
         }
     }
 
@@ -218,19 +211,19 @@ struct ClientIDStoreTests {
                 defaults: defaults,
                 bundledClientID: nil,
                 bundledClientSecret: "  bundled-secret  ",
-                environment: [ClientIDStore.secretEnvironmentKey: "env-secret"])
+                environment: [ClientIDStore.secretEnvironmentKey: "env-secret"], secretsFile: nil)
             #expect(fromBundle.clientSecret() == "bundled-secret")
             let fromEnv = ClientIDStore(
                 defaults: defaults,
                 bundledClientID: nil,
                 bundledClientSecret: "   ",
-                environment: [ClientIDStore.secretEnvironmentKey: "env-secret"])
+                environment: [ClientIDStore.secretEnvironmentKey: "env-secret"], secretsFile: nil)
             #expect(fromEnv.clientSecret() == "env-secret")
             let missing = ClientIDStore(
                 defaults: defaults,
                 bundledClientID: nil,
                 bundledClientSecret: nil,
-                environment: [:])
+                environment: [:], secretsFile: nil)
             #expect(missing.clientSecret() == nil)
         }
     }
