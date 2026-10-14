@@ -28,6 +28,7 @@ final class LoginWindowController: NSWindowController {
     init(
         facade: CredentialFacade,
         clientID: String,
+        clientIDDefaults: UserDefaults = .standard,
         tokenClientFactory: @escaping TokenClientFactory = { TokenClient(clientID: $0, clientSecret: $1) },
         sessionFactory: @escaping SessionFactory = { LoginSession(window: $0) }
     ) {
@@ -35,7 +36,8 @@ final class LoginWindowController: NSWindowController {
         // Orden (CBU-36): override en UserDefaults > Info.plist > entorno.
         var environment = ProcessInfo.processInfo.environment
         if !clientID.isEmpty { environment[ClientIDStore.environmentKey] = clientID }
-        self.clientIDStore = ClientIDStore(environment: environment)
+        // GH-72: el override vive en la suite del perfil, no en `.standard`.
+        self.clientIDStore = ClientIDStore(defaults: clientIDDefaults, environment: environment)
         self.tokenClientFactory = tokenClientFactory
         self.sessionFactory = sessionFactory
 

@@ -1,4 +1,5 @@
 import AppKit
+import AuthKit
 import ExplorerUI
 import GCPClient
 import OSLog
@@ -26,11 +27,15 @@ struct KeychainWindowsCredentialVault: WindowsCredentialVault {
             .persistencePath.replacingOccurrences(of: "/", with: ".")
     }
 
-    var secureStore: @Sendable (InstanceInfo) -> any SettingsStore = {
-        KeychainSettingsStore(service: "com.iapdesktop.mac.settings.secure.\(component(for: $0))")
+    /// GH-72: namespace del perfil (mismos nombres que el panel Settings).
+    let environment: ProfileEnvironment
+
+    func secureStore(_ instance: InstanceInfo) -> any SettingsStore {
+        KeychainSettingsStore(service: environment.settingsSecureService(component: Self.component(for: instance)))
     }
-    var plainStore: @Sendable (InstanceInfo) -> any SettingsStore = {
-        UserDefaultsSettingsStore(suiteName: "com.iapdesktop.mac.settings.\(component(for: $0))")
+
+    func plainStore(_ instance: InstanceInfo) -> any SettingsStore {
+        UserDefaultsSettingsStore(suiteName: environment.settingsSuite(component: Self.component(for: instance)))
     }
 
     func load(for instance: InstanceInfo) throws -> WindowsLogonCredential? {
@@ -89,13 +94,8 @@ final class RdpConnectFlow {
     private let credentials: WindowsCredentialCoordinator
     private var busy: Set<RdpTarget> = []
 
-    /// Instancias para las que el siguiente `connect` solo debe generar
-    /// credenciales (menú "Generate Windows credentials…"): la App solo
-    /// cablea `connect`, y App.swift queda fuera de esta tarea.
-    static var credentialsOnly: Set<String> = []
-
     init(
-        client: GCPClient, tunnels: any RdpTunnelOpening,
+        client: GCPClient, tunnels: any RdpTunnelOpening, environment: ProfileEnvironment,
         email: @escaping () async -> String?, window: @escaping () -> NSWindow?, note: @escaping (String) -> Void
     ) {
         self.client = client
@@ -103,7 +103,7 @@ final class RdpConnectFlow {
         self.email = email
         self.window = window
         self.note = note
-        self.credentials = WindowsCredentialCoordinator(vault: KeychainWindowsCredentialVault()) { instance, username in
+        self.credentials = WindowsCredentialCoordinator(vault: KeychainWindowsCredentialVault(environment: environment)) { instance, username in
             let credential = try await client.resetWindowsCredentials(
                 project: instance.project, zone: instance.zone, instance: instance.name, username: username)
             return WindowsLogonCredential(username: credential.username, password: credential.password)
@@ -116,10 +116,6 @@ final class RdpConnectFlow {
     }
 
     func connect(_ instance: InstanceInfo) {
-        if Self.credentialsOnly.remove(instance.id) != nil {
-            generateCredentials(instance)
-            return
-        }
         let target = RdpTarget(project: instance.project, zone: instance.zone, instance: instance.name)
         guard !busy.contains(target) else { return }
         guard WindowsAppLauncher().applicationURL != nil else {
@@ -399,6 +395,9 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
 
     /// Título del item SFTP del menú contextual.
     static let browseFilesTitle = "Browse files…"
+    /// CBU-54/GH-72: "Generate Windows credentials…" (antes, un `static`
+    /// global marcaba el siguiente `connect`; con varios perfiles se mezclaría).
+    var onGenerateCredentials: ((InstanceInfo) -> Void)?
 
     init?(window: NSWindow?, onWindowsConnect: @escaping (InstanceInfo) -> Void) {
         guard let outline = Self.findOutline(in: window?.contentView) else { return nil }
@@ -411,11 +410,9 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
         outline.target = self
         outline.doubleAction = #selector(doubleClicked(_:))
         outline.menu?.delegate = self
-        // CBU-54: "Generate Windows credentials…" → mismo flujo, sin conectar.
+        // CBU-54: "Generate Windows credentials…" → flujo de credenciales, sin conectar.
         (window?.windowController as? ExplorerWindowController)?.onGenerateWindowsCredentialsRequest = {
-            [onWindowsConnect] instance in
-            RdpConnectFlow.credentialsOnly.insert(instance.id)
-            onWindowsConnect(instance)
+            [weak self] instance in self?.onGenerateCredentials?(instance)
         }
     }
 
