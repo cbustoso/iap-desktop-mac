@@ -393,6 +393,10 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
     /// GH-60: "Browse files…" en instancias Linux (SFTP); `nil` = sin item.
     var onBrowseFiles: ((InstanceInfo) -> Void)?
 
+    /// GH-65: "Diagnose connection…" en cualquier instancia; `nil` = sin item.
+    var onDiagnose: ((InstanceInfo) -> Void)?
+    static let diagnoseTitle = "Diagnose connection…"
+
     /// Título del item SFTP del menú contextual.
     static let browseFilesTitle = "Browse files…"
 
@@ -448,6 +452,17 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
             browse.toolTip = "Explorar ficheros por SFTP (misma sesión SSH)"
             menu.insertItem(browse, at: connectIndex + 1)
         }
+        if onDiagnose != nil, let any = instance(atRow: outline?.clickedRow ?? -1),
+           let connectIndex = menu.items.firstIndex(where: { $0.title == ExplorerCommand.connect.title }) {
+            let diagnose = NSMenuItem(title: Self.diagnoseTitle, action: #selector(diagnoseFromMenu(_:)), keyEquivalent: "")
+            diagnose.target = self
+            diagnose.representedObject = RdpMenuPayload(instance: any)
+            diagnose.image = NSImage(systemSymbolName: "stethoscope", accessibilityDescription: nil)
+            diagnose.toolTip = "Comprobar IAM, firewall (35.235.240.0/20) y túnel IAP"
+            // Tras "Connect" y, si existe, "Browse files…".
+            let browse = menu.items.firstIndex { $0.title == Self.browseFilesTitle }
+            menu.insertItem(diagnose, at: (browse ?? connectIndex) + 1)
+        }
         guard let instance = windowsInstance(atRow: outline?.clickedRow ?? -1),
               let connect = menu.items.first(where: { $0.title == ExplorerCommand.connect.title })
         else { return }
@@ -457,6 +472,10 @@ final class WindowsConnectInterposer: NSObject, NSMenuDelegate {
         connect.isEnabled = true
         connect.badge = nil
         connect.toolTip = "Abrir RDP con Windows App vía IAP"
+    }
+
+    @objc private func diagnoseFromMenu(_ sender: NSMenuItem) {
+        if let payload = sender.representedObject as? RdpMenuPayload { onDiagnose?(payload.instance) }
     }
 
     @objc private func browseFromMenu(_ sender: NSMenuItem) {
