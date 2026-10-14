@@ -3,20 +3,16 @@ import Foundation
 
 // GH-69: proxy corporativo. Paridad `docs/feature-parity.md` §"Proxy
 // corporativo" (`WebRequest.DefaultWebProxy` + `NtlmResilientWebRequestHandler`
-// del original) y `specs/auth/design.md` ("Proxy: `ProxyResolver`
-// (`CFNetworkCopyProxiesForURL`) inyectado en
-// `URLSessionConfiguration.connectionProxyDictionary`"). Resuelve el proxy
-// del sistema (incluida ejecución de PAC) para las llamadas HTTPS de
-// `AuthKit` (`oauth2.googleapis.com`/`sts.googleapis.com`).
+// del original; `Options.Proxy=null` si PSC en el cliente WebSocket) y
+// `specs/auth/design.md` ("Proxy: `ProxyResolver` (`CFNetworkCopyProxiesForURL`)
+// inyectado en `URLSessionConfiguration.connectionProxyDictionary`"). Resuelve
+// el proxy del sistema (incluida ejecución de PAC).
 //
-// NOTA DE DUPLICACIÓN: este tipo también existe, con el mismo contenido
-// nuclear, en `Sources/TunnelKit/ProxyResolver.swift` (para el `CONNECT` del
-// túnel `wss://`). `AuthKit` y `TunnelKit` no se dependen entre sí y esta
-// tarea tiene prohibido tocar `Package.swift` (que es donde se declararía un
-// target compartido, p. ej. `ProxyKit`), así que el núcleo se duplica a
-// propósito en vez de inventar una dependencia cruzada no declarada. Si en el
-// futuro se permite tocar `Package.swift`, extraer este tipo a un target
-// propio y hacer que ambos lo importen, eliminando la copia.
+// GH-70: implementación ÚNICA, compartida. La usan las llamadas HTTPS de
+// `AuthKit` (`oauth2`/`sts`, adaptador `connectionProxyDictionary` abajo) y
+// `TunnelKit` para el `HTTP CONNECT` del túnel `wss://` (adaptador
+// `relayProxyConfig` en `Sources/TunnelKit/ProxyResolver.swift`).
+// `TunnelKit` depende de `AuthKit` (y no al revés: AuthKit no arrastra NIO).
 //
 // Sin soporte NTLM (irrelevante en macOS, paridad explícita de la tabla de
 // feature-parity) ni SOCKS (ningún consumidor —`URLSession` para AuthKit,

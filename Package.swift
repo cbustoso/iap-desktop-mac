@@ -24,6 +24,7 @@ let package = Package(
         .target(
             name: "TunnelKit",
             dependencies: [
+                "AuthKit",  // ProxyResolver compartido (GH-70); AuthKit no depende de nada
                 .product(name: "WebSocketKit", package: "websocket-kit"),
                 .product(name: "NIOCore", package: "swift-nio"),
             ]),
