@@ -1,6 +1,8 @@
 import Foundation
 
-/// Extremos IAP: `wss://tunnel.cloudproxy.app/v4/` (+ `mtls.` con device cert, M4).
+import AuthKit
+
+/// Extremos IAP: `wss://tunnel.cloudproxy.app/v4/` (+ `mtls.` con device cert, GH-68).
 /// Cf. `IapClient.cs` / `IapInstanceTarget.cs` (origen C#).
 public struct IapEndpoint: Sendable, Equatable {
     public static let host = "tunnel.cloudproxy.app"
@@ -13,20 +15,27 @@ public struct IapEndpoint: Sendable, Equatable {
     public var instance: String
     public var interface: String
     public var port: UInt16
+    /// Host del relay según `ServiceEndpointDirections` (GH-68): público,
+    /// `mtls.tunnel.cloudproxy.app` o el endpoint PSC.
+    public var serviceHost: String
 
-    public init(project: String, zone: String, instance: String, interface: String = "nic0", port: UInt16) {
+    public init(
+        project: String, zone: String, instance: String, interface: String = "nic0", port: UInt16,
+        directions: ServiceEndpointDirections = .publicEndpoint
+    ) {
         self.project = project
         self.zone = zone
         self.instance = instance
         self.interface = interface
         self.port = port
+        serviceHost = ServiceEndpoint.iapTunnel.host(for: directions)
     }
 
     /// `.../connect?project&zone&instance&interface&port&_=guid`
     public func connectURL() -> URL? {
         var components = URLComponents()
         components.scheme = "wss"
-        components.host = Self.host
+        components.host = serviceHost
         components.path = "/v4/connect"
         components.queryItems = [
             URLQueryItem(name: "project", value: project),
@@ -40,10 +49,10 @@ public struct IapEndpoint: Sendable, Equatable {
     }
 
     /// `.../reconnect?sid&ack&zone`
-    public static func reconnectURL(sid: String, ack: UInt64, zone: String) -> URL? {
+    public static func reconnectURL(sid: String, ack: UInt64, zone: String, host: String = Self.host) -> URL? {
         var components = URLComponents()
         components.scheme = "wss"
-        components.host = Self.host
+        components.host = host
         components.path = "/v4/reconnect"
         components.queryItems = [
             URLQueryItem(name: "sid", value: sid),

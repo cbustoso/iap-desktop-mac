@@ -17,7 +17,7 @@ public struct RelayEndpoint: Sendable {
     public init(_ iap: IapEndpoint) {
         self.init(
             connectURL: { iap.connectURL() },
-            reconnectURL: { sid, ack in IapEndpoint.reconnectURL(sid: sid, ack: ack, zone: iap.zone) })
+            reconnectURL: { sid, ack in IapEndpoint.reconnectURL(sid: sid, ack: ack, zone: iap.zone, host: iap.serviceHost) })
     }
 }
 
