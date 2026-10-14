@@ -268,15 +268,15 @@ struct ProjectWorkspaceTests {
         let workspace = workspace { request in
             ExplorerStubURLProtocol.response(for: request, status: 401)
         }
-        let mock = [ProjectInfo(name: "demo (MOCK)", zones: [])]
-        let viewModel = ExplorerViewModel(projects: mock)
+        let snapshot = [ProjectInfo(name: "project-a", zones: [])]
+        let viewModel = ExplorerViewModel(projects: snapshot)
         let outcome = await viewModel.reloadAllFromGCP(workspace: workspace)
         guard case .failure(let error) = outcome else {
             Issue.record("se esperaba fallo")
             return
         }
         #expect(error as? GoogleAPIFailure == GoogleAPIFailure(status: 401, reason: nil))
-        #expect(viewModel.projects == mock)  // se conserva el mock
+        #expect(viewModel.projects == snapshot)  // se conserva el snapshot (el 401 lo decide la App)
         #expect(!viewModel.isLive)
     }
 
@@ -307,5 +307,97 @@ private final class Locked<Value: Sendable>: @unchecked Sendable {
     var value: Value {
         get { lock.withLock { stored } }
         set { lock.withLock { stored = newValue } }
+    }
+}
+
+// GH-78: sin sesión no hay nodos ni cargas; logout/401 vacía el árbol.
+// En el mismo suite `.serialized` porque comparte el handler estático del stub.
+extension ProjectWorkspaceTests {
+    nonisolated private static let discovery = #"{"projects":[{"projectId":"project-a","name":"A","lifecycleState":"ACTIVE"}]}"#
+
+    nonisolated private static func liveHandler(_ calls: HandlerCalls? = nil) -> ExplorerStubURLProtocol.Handler {
+        { request in
+            calls?.record(project: request.url?.host, onMainThread: Thread.isMainThread)
+            if request.url?.host == "cloudresourcemanager.googleapis.com" {
+                return ExplorerStubURLProtocol.response(for: request, json: discovery)
+            }
+            return ExplorerStubURLProtocol.response(for: request, json: liveResponse)
+        }
+    }
+
+    @Test func signedOutShowsNoNodesAndNeverCallsGoogle() async {
+        let calls = HandlerCalls()
+        let workspace = workspace(handler: Self.liveHandler(calls))
+        let viewModel = ExplorerViewModel(
+            projects: [ProjectInfo(name: "demo-web (MOCK)", zones: [])], isSignedIn: false)
+        #expect(viewModel.projects.isEmpty)  // ni siquiera un snapshot inyectado
+        #expect(viewModel.statusSummary(source: "GCP") == ExplorerViewModel.signedOutSummary)
+
+        let outcome = await viewModel.reloadAllowingStored(workspace: workspace, stored: ["project-a"])
+        guard case .failure(let error) = outcome else {
+            Issue.record("sin sesión no debe cargar")
+            return
+        }
+        #expect(error as? ExplorerSessionError == .signedOut)
+        await viewModel.reloadFromGCP(workspace: workspace, projectIDs: ["project-a"])
+        #expect(viewModel.projects.isEmpty)
+        #expect(calls.projects.isEmpty)  // ninguna petición a Google
+    }
+
+    @Test func stubbedSessionLoadsLiveData() async {
+        let workspace = workspace(handler: Self.liveHandler())
+        let viewModel = ExplorerViewModel(isSignedIn: false)
+        viewModel.sessionStarted()
+        let outcome = await viewModel.reloadAllowingStored(workspace: workspace, stored: [])
+        guard case .success = outcome else {
+            Issue.record("se esperaba carga: \(outcome)")
+            return
+        }
+        #expect(viewModel.isLive)
+        #expect(viewModel.projects.map(\.name) == ["project-a"])
+        #expect(viewModel.statusSummary(source: "GCP").hasPrefix("LIVE — 1 proyecto"))
+    }
+
+    @Test func logoutClearsTreeSelectionAndLiveState() async {
+        let workspace = workspace(handler: Self.liveHandler())
+        let viewModel = ExplorerViewModel(isSignedIn: false)
+        viewModel.sessionStarted()
+        _ = await viewModel.reloadAllowingStored(workspace: workspace, stored: [])
+        viewModel.selection = viewModel.projects.first?.zones.first?.instances.first
+        #expect(viewModel.selection != nil)
+        var changes = 0
+        viewModel.onChange = { changes += 1 }
+
+        viewModel.sessionEnded()
+
+        #expect(viewModel.projects.isEmpty)
+        #expect(viewModel.selection == nil)
+        #expect(!viewModel.isLive && !viewModel.isSignedIn)
+        #expect(viewModel.statusSummary(source: "GCP") == ExplorerViewModel.signedOutSummary)
+        #expect(changes >= 1)  // la ventana se repinta (vuelve el estado vacío)
+    }
+
+    @Test func loadFinishingAfterLogoutIsDiscarded() async {
+        let gate = DispatchSemaphore(value: 0)
+        let (entered, signal) = AsyncStream<Void>.makeStream()
+        let workspace = workspace { request in
+            signal.yield()
+            gate.wait()  // hilo de CFNetwork: la respuesta llega tras el logout
+            return Self.liveHandler()(request)
+        }
+        let viewModel = ExplorerViewModel(isSignedIn: false)
+        viewModel.sessionStarted()
+        let load = Task { await viewModel.reloadAllowingStored(workspace: workspace, stored: []) }
+        for await _ in entered { break }
+        viewModel.sessionEnded()
+        for _ in 0..<16 { gate.signal() }  // todas las peticiones de la carga
+        let outcome = await load.value
+        guard case .failure(let error) = outcome else {
+            Issue.record("la carga posterior al logout debía descartarse")
+            return
+        }
+        #expect(error as? ExplorerSessionError == .signedOut)
+        #expect(viewModel.projects.isEmpty)
+        #expect(!viewModel.isLive)
     }
 }

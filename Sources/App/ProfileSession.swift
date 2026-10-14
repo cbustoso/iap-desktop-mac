@@ -33,7 +33,8 @@ final class ProfileSession: NSObject {
     private(set) var windowController: ExplorerWindowController?
     private var loginWindowController: LoginWindowController?
     private var settingsPanelController: SettingsPanelWindowController?
-    let viewModel = ExplorerViewModel(projects: MockWorkspace.sample())
+    /// GH-78: sin mock: vacío ("Sign In") hasta tener sesión válida.
+    let viewModel = ExplorerViewModel(isSignedIn: false)
 
     private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
     private lazy var vmClient = GCPClient(tokenProvider: accessToken)
@@ -155,9 +156,10 @@ final class ProfileSession: NSObject {
     /// Crea la ventana del perfil y su wiring (lo que antes hacía
     /// `applicationDidFinishLaunching`), y restaura su sesión.
     func openWindow() {
-        let windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
+        let windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "GCP")
         self.windowController = windowController
         windowController.window?.title = windowTitle
+        windowController.onSignInRequest = { [weak self] in self?.showLoginWindow(nil) }
         windowController.onAddProject = { [weak self] in self?.addProjectDialog(nil) }
         let settingsDataSource = ApplicationSettingsDataSource(environment: environment) { [weak self] in
             self?.viewModel.projects ?? []
@@ -205,7 +207,10 @@ final class ProfileSession: NSObject {
             await self.restoreSession()
             await self.refreshAccount()
             self.observeSession()
-            await self.loadLiveData(trigger: "launch")
+            if await self.credentialFacade.currentEmail != nil {
+                self.viewModel.sessionStarted()
+                await self.loadLiveData(trigger: "launch")
+            }
         }
     }
 
@@ -228,8 +233,11 @@ final class ProfileSession: NSObject {
                 await self.refreshAccount()
                 self.onAccountChanged?(self, await self.credentialFacade.currentOffline)
                 if await self.credentialFacade.currentEmail != nil {
+                    self.viewModel.sessionStarted()
                     await self.loadLiveData(trigger: "reauthorized")
                 } else {
+                    // Logout: vuelve al estado vacío "Sign In".
+                    self.viewModel.sessionEnded()
                     self.windowController?.statusNote = ""
                 }
             }
@@ -249,6 +257,10 @@ final class ProfileSession: NSObject {
     }
 
     private func loadLiveData(trigger: String) async {
+        guard viewModel.isSignedIn else {
+            Self.log.notice("autoload skipped reason=signed-out trigger=\(trigger, privacy: .public)")
+            return
+        }
         Self.log.notice("autoload started trigger=\(trigger, privacy: .public) profile=\(self.id.rawValue, privacy: .public) \(BuildInfo.current, privacy: .public)")
         switch await viewModel.reloadAllowingStored(workspace: workspace, stored: knownProjectIDs) {
         case .success(let discovered):
@@ -269,11 +281,24 @@ final class ProfileSession: NSObject {
                 """)
             windowController?.statusNote = ProjectWorkspace.discoveryNote(
                 for: discoveryFailure, shown: knownProjectIDs.count)
+        case .failure(ExplorerSessionError.signedOut):
+            // Logout/401 mientras cargaba: se descarta sin pisar la nota.
+            Self.log.notice("autoload discarded reason=signed-out trigger=\(trigger, privacy: .public)")
         case .failure(let error):
             let failure = AppDelegate.diagnose(error)
+            // GH-78: credenciales rechazadas → estado vacío "Sign In" (con la nota).
+            if Self.requiresSignIn(failure) { viewModel.sessionEnded() }
             let detail = (error as? GoogleAPIFailure).map { " \($0.logDescription)" } ?? ""
             Self.log.error("autoload failed \(failure.logCause, privacy: .public)\(detail, privacy: .public) \(BuildInfo.current, privacy: .public)")
             windowController?.statusNote = failure.userNote
+        }
+    }
+
+    /// ¿El fallo invalida la sesión (sin datos hasta volver a iniciar sesión)?
+    nonisolated static func requiresSignIn(_ failure: AutoLoadFailure) -> Bool {
+        switch failure {
+        case .notSignedIn, .sessionRejected, .sessionFromOtherClient: return true
+        default: return false
         }
     }
 

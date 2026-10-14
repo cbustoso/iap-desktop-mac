@@ -28,6 +28,11 @@ public final class ExplorerWindowController: NSWindowController {
     private let dataSourceLabel: String
 
     private let outline = NSOutlineView()
+    private let outlineScroll = NSScrollView()
+    /// GH-78: estado vacío sin sesión (sustituye al árbol mock).
+    let signInPrompt = NSStackView()
+    let signInButton = NSButton(title: "Sign In", target: nil, action: nil)
+    static let signInPromptText = "Inicia sesión con tu cuenta de Google para ver tus proyectos e instancias."
     private let mainSplit = NSSplitView()
     private let centerSplit = NSSplitView()
     let sessionArea = SessionAreaView()
@@ -67,6 +72,11 @@ public final class ExplorerWindowController: NSWindowController {
     public var onSoftwarePackagesRequest: (@MainActor (InventoryScope) -> Void)?
     /// La App aporta la persistencia; ExplorerUI solo comunica el nivel seleccionado.
     public var onOpenSettings: (@MainActor (SettingsPanelScope?) -> Void)?
+    /// GH-78: botón "Sign In" del estado vacío (la App abre la ventana de login).
+    public var onSignInRequest: (@MainActor () -> Void)?
+
+    /// ¿Se muestra el estado vacío "Sign In" en vez del árbol?
+    public var isShowingSignInPrompt: Bool { !signInPrompt.isHidden }
     let propertiesPane = PropertiesView()
     let statusBar = StatusBarView()
 
@@ -83,7 +93,8 @@ public final class ExplorerWindowController: NSWindowController {
     private static let sidebarWidth: CGFloat = 280
     private static let propertiesHeight: CGFloat = 260
 
-    /// - Parameter dataSourceLabel: origen de los datos para la status bar ("MOCK").
+    /// - Parameter dataSourceLabel: origen de los datos para la status bar
+    ///   antes de la primera carga en vivo.
     public init(viewModel: ExplorerViewModel, dataSourceLabel: String = "MOCK") {
         self.viewModel = viewModel
         self.dataSourceLabel = dataSourceLabel
@@ -208,17 +219,35 @@ public final class ExplorerWindowController: NSWindowController {
         contextMenu.delegate = self
         outline.menu = contextMenu
 
-        let scroll = NSScrollView()
+        let scroll = outlineScroll
         scroll.documentView = outline
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
 
-        for view in [title, search, toggles, scroll] {
+        let promptLabel = NSTextField(wrappingLabelWithString: Self.signInPromptText)
+        promptLabel.alignment = .center
+        promptLabel.textColor = .secondaryLabelColor
+        promptLabel.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        signInButton.bezelStyle = .rounded
+        signInButton.keyEquivalent = "\r"
+        signInButton.target = self
+        signInButton.action = #selector(signInClicked(_:))
+        signInPrompt.orientation = .vertical
+        signInPrompt.alignment = .centerX
+        signInPrompt.spacing = 10
+        signInPrompt.addArrangedSubview(promptLabel)
+        signInPrompt.addArrangedSubview(signInButton)
+
+        for view in [title, search, toggles, scroll, signInPrompt] {
             view.translatesAutoresizingMaskIntoConstraints = false
             panel.addSubview(view)
         }
         NSLayoutConstraint.activate([
+            signInPrompt.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+            signInPrompt.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
+            signInPrompt.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
+            promptLabel.widthAnchor.constraint(equalTo: signInPrompt.widthAnchor),
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
             title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
             search.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
@@ -242,6 +271,10 @@ public final class ExplorerWindowController: NSWindowController {
 
     @objc public func addProject(_ sender: Any?) {
         if let onAddProject { onAddProject() } else { showStub(title: "Add project", milestone: "M2") }
+    }
+
+    @objc func signInClicked(_ sender: Any?) {
+        onSignInRequest?()
     }
 
     @objc public func refreshExplorer(_ sender: Any?) {
@@ -405,7 +438,10 @@ public final class ExplorerWindowController: NSWindowController {
         let cloud = ExplorerNode.cloud(
             projectCount: projects.count,
             instanceCount: projects.reduce(0) { $0 + $1.zones.reduce(0) { $0 + $1.instances.count } })
-        rootItem = OutlineItem(
+        let signedIn = viewModel.isSignedIn
+        signInPrompt.isHidden = signedIn
+        outlineScroll.isHidden = !signedIn
+        rootItem = !signedIn ? nil : OutlineItem(
             node: cloud,
             children: projects.map { project in
                 OutlineItem(
