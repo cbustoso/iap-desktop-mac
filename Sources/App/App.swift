@@ -344,42 +344,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-/// Fallback visible mientras no haya credenciales o una carga GCP falle.
-enum MockWorkspace {
-    static func sample() -> [ProjectInfo] {
-        [
-            ProjectInfo(name: "demo-web (MOCK)", zones: [
-                ZoneInfo(project: "demo-web", name: "europe-west1-b", instances: [
-                    InstanceInfo(
-                        project: "demo-web", zone: "europe-west1-b", name: "web-01",
-                        os: .linux, status: .running, connected: true),
-                    InstanceInfo(
-                        project: "demo-web", zone: "europe-west1-b", name: "web-02",
-                        os: .linux, status: .running),
-                    InstanceInfo(
-                        project: "demo-web", zone: "europe-west1-b", name: "adsrv-01",
-                        os: .windows, status: .stopped),
-                ]),
-                ZoneInfo(project: "demo-web", name: "europe-west1-c", instances: [
-                    InstanceInfo(
-                        project: "demo-web", zone: "europe-west1-c", name: "db-01",
-                        os: .linux, status: .running),
-                ]),
-            ]),
-            ProjectInfo(name: "demo-data (MOCK)", zones: [
-                ZoneInfo(project: "demo-data", name: "us-central1-a", instances: [
-                    InstanceInfo(
-                        project: "demo-data", zone: "us-central1-a", name: "etl-01",
-                        os: .linux, status: .stopped),
-                    InstanceInfo(
-                        project: "demo-data", zone: "us-central1-a", name: "win-bastion",
-                        os: .windows, status: .running),
-                ]),
-            ]),
-        ]
-    }
-}
-
 /// Delegado de la ventana del Explorer: `windowShouldClose` (GH-64) y aviso de
 /// cierre para liberar la `ProfileSession` del perfil (GH-72).
 @MainActor
