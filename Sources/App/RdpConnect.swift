@@ -30,6 +30,18 @@ struct KeychainWindowsCredentialVault: WindowsCredentialVault {
     /// GH-72: namespace del perfil (mismos nombres que el panel Settings).
     let environment: ProfileEnvironment
 
+    /// Misma jerarquía y stores que `ApplicationSettingsDataSource`.
+    var hierarchy: SettingsStoreHierarchy {
+        let environment = environment
+        return SettingsStoreHierarchy { scope, isSensitive in
+            let component = scope.persistencePath.replacingOccurrences(of: "/", with: ".")
+            if isSensitive {
+                return KeychainSettingsStore(service: environment.settingsSecureService(component: component))
+            }
+            return UserDefaultsSettingsStore(suiteName: environment.settingsSuite(component: component))
+        }
+    }
+
     func secureStore(_ instance: InstanceInfo) -> any SettingsStore {
         KeychainSettingsStore(service: environment.settingsSecureService(component: Self.component(for: instance)))
     }
@@ -38,10 +50,15 @@ struct KeychainWindowsCredentialVault: WindowsCredentialVault {
         UserDefaultsSettingsStore(suiteName: environment.settingsSuite(component: Self.component(for: instance)))
     }
 
+    /// GH-75: lectura efectiva (instancia → zona → proyecto → universo), como
+    /// `CreateRdpCredentialFromSettings`; la escritura sigue en la instancia.
     func load(for instance: InstanceInfo) throws -> WindowsLogonCredential? {
-        let password: Setting<String> = try secureStore(instance).read(key: Self.passwordKey, defaultValue: "")
+        let scope = RdpEffectiveSettingsSource.scope(for: instance)
+        let password: Setting<String> = try hierarchy.effectiveStore(at: scope, isSensitive: true)
+            .read(key: Self.passwordKey, defaultValue: "")
         guard password.isSpecified else { return nil }
-        let username: Setting<String> = try plainStore(instance).read(key: Self.usernameKey, defaultValue: "")
+        let username: Setting<String> = try hierarchy.effectiveStore(at: scope)
+            .read(key: Self.usernameKey, defaultValue: "")
         return WindowsLogonCredential(username: username.value, password: password.value)
     }
 
@@ -52,6 +69,39 @@ struct KeychainWindowsCredentialVault: WindowsCredentialVault {
         var username = Setting(key: Self.usernameKey, defaultValue: "")
         username.value = credential.username
         try plainStore(instance).write(username)
+    }
+}
+
+/// GH-75: settings RDP efectivos de una instancia desde la jerarquía del panel
+/// Settings (solo store no sensible: la contraseña la lee el vault).
+struct RdpEffectiveSettingsSource: RdpSettingsSource {
+    let store: any SettingsStore
+
+    init(hierarchy: SettingsStoreHierarchy, instance: InstanceInfo) {
+        store = hierarchy.effectiveStore(at: Self.scope(for: instance))
+    }
+
+    static func scope(for instance: InstanceInfo) -> SettingsScope {
+        .instance(project: instance.project, zone: instance.zone, instance: instance.name)
+    }
+
+    /// Los enums se guardan como `Int`, los toggles del panel como `Bool` y los
+    /// textos como `String`: se prueba cada tipo; si ninguno decodifica, error.
+    func value(forKey key: String) throws -> RdpSettingValue? {
+        if let value = try decoded(0, key) { return value.map(RdpSettingValue.integer) }
+        if let value = try decoded(false, key) { return value.map(RdpSettingValue.bool) }
+        if let value = try decoded("", key) { return value.map(RdpSettingValue.text) }
+        throw SettingsError.invalidValue(key: key)
+    }
+
+    /// `nil` = otro tipo; `.some(nil)` = no especificado en ningún nivel.
+    private func decoded<V: Codable & Equatable & Sendable>(_ placeholder: V, _ key: String) throws -> V?? {
+        do {
+            let setting: Setting<V> = try store.read(key: key, defaultValue: placeholder)
+            return .some(setting.isSpecified ? setting.value : nil)
+        } catch SettingsError.invalidValue {
+            return nil
+        }
     }
 }
 
@@ -92,6 +142,7 @@ final class RdpConnectFlow {
     private let window: () -> NSWindow?
     private let note: (String) -> Void
     private let credentials: WindowsCredentialCoordinator
+    private let vault: KeychainWindowsCredentialVault
     private var busy: Set<RdpTarget> = []
 
     init(
@@ -103,7 +154,9 @@ final class RdpConnectFlow {
         self.email = email
         self.window = window
         self.note = note
-        self.credentials = WindowsCredentialCoordinator(vault: KeychainWindowsCredentialVault(environment: environment)) { instance, username in
+        let vault = KeychainWindowsCredentialVault(environment: environment)
+        self.vault = vault
+        self.credentials = WindowsCredentialCoordinator(vault: vault) { instance, username in
             let credential = try await client.resetWindowsCredentials(
                 project: instance.project, zone: instance.zone, instance: instance.name, username: username)
             return WindowsLogonCredential(username: credential.username, password: credential.password)
@@ -127,11 +180,14 @@ final class RdpConnectFlow {
             guard let self else { return }
             defer { self.busy.remove(target) }
             do {
-                guard let username = try await self.resolveCredential(for: target, instance: instance) else { return }
-                self.note("RDP: abriendo túnel IAP a \(instance.name):3389…")
+                let settings = self.effectiveSettings(for: instance)
+                guard let username = try await self.resolveCredential(
+                    for: target, instance: instance, settingsUsername: settings.username)
+                else { return }
+                self.note("RDP: abriendo túnel IAP a \(instance.name):\(settings.parameters.port)…")
                 let launch = try await self.connector.connect(
-                    to: target, parameters: RdpParameters(),
-                    credential: username.map { RdpCredentialReference(username: $0) })
+                    to: target, parameters: settings.parameters,
+                    credential: settings.credential(username: username))
                 Self.log.notice("""
                     rdp launched target=\(target.description, privacy: .public) \
                     localPort=\(launch.localPort, privacy: .public) reused=\(launch.reusedTunnel, privacy: .public)
@@ -143,6 +199,17 @@ final class RdpConnectFlow {
                 self.present(error, instance: instance)
             }
         }
+    }
+
+    /// GH-75: settings efectivos del panel (instancia → zona → proyecto →
+    /// universo) para el `.rdp` y el puerto del túnel.
+    private func effectiveSettings(for instance: InstanceInfo) -> RdpEffectiveSettings {
+        let settings = RdpEffectiveSettings.resolve(
+            from: RdpEffectiveSettingsSource(hierarchy: vault.hierarchy, instance: instance))
+        if !settings.ignoredKeys.isEmpty {
+            Self.log.notice("rdp settings ignored keys=\(settings.ignoredKeys.joined(separator: ","), privacy: .public)")
+        }
+        return settings
     }
 
     /// Menú "Generate Windows credentials…": genera (o regenera) y guarda,
@@ -170,8 +237,11 @@ final class RdpConnectFlow {
         }
     }
 
-    /// `nil` = cancelado; `.some(nil)` = sin usuario (Windows App lo pedirá).
-    private func resolveCredential(for target: RdpTarget, instance: InstanceInfo) async throws -> String?? {
+    /// `nil` = cancelado; `.some(nil)` = sin usuario generado (se usa el de
+    /// settings, si hay; si no, Windows App lo pedirá).
+    private func resolveCredential(
+        for target: RdpTarget, instance: InstanceInfo, settingsUsername: String?
+    ) async throws -> String?? {
         // Guardada en Keychain y utilizable: se muestra el diálogo (no solo
         // aviso) porque Windows App no puede rellenar sola la contraseña del
         // .rdp — el usuario debe pegarla desde el portapapeles.
@@ -202,7 +272,12 @@ final class RdpConnectFlow {
             }
         }
         Self.log.notice("rdp keychain miss target=\(target.description, privacy: .public)")
-        let suggested = WindowsUsername.suggest(email: await email())
+        let suggested: String
+        if let settingsUsername {
+            suggested = settingsUsername
+        } else {
+            suggested = WindowsUsername.suggest(email: await email())
+        }
         switch askForCredentials(instance: instance, suggested: suggested, connecting: true, replacing: false) {
         case .cancel:
             return nil
