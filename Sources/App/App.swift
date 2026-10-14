@@ -24,6 +24,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
     private lazy var vmClient = GCPClient(tokenProvider: accessToken)
     private var serialOutputPanels: [String: SerialOutputWindowController] = [:]
+    /// GH-65: diagnóstico de conectividad IAP.
+    private lazy var diagnosticsPanels = DiagnosticsPanels(client: vmClient, accessToken: accessToken)
     private var eventLogPanels: [String: EventLogWindowController] = [:]
     private var inventoryPanels: [String: InventoryWindowController] = [:]
 
@@ -364,6 +366,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connectItem(),
             browseFilesItem(),
             serialOutputItem(),
+            diagnosticsItem(),
             eventLogItem(),
             pending("Connect as user…", milestone: "M2"),
             pending("Connection settings…", milestone: "M2"),
@@ -415,6 +418,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let menuItem = item("Connect", #selector(connectSelected(_:)))
         menuItem.target = self
         return menuItem
+    }
+
+    private func diagnosticsItem() -> NSMenuItem {
+        let menuItem = item(WindowsConnectInterposer.diagnoseTitle, #selector(diagnoseSelected(_:)))
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func diagnoseSelected(_ sender: Any?) {
+        guard let instance = viewModel.selection else {
+            let alert = NSAlert()
+            alert.messageText = WindowsConnectInterposer.diagnoseTitle
+            alert.informativeText = "Selecciona una instancia en Project Explorer."
+            alert.addButton(withTitle: "OK")
+            alert.runModal()
+            return
+        }
+        diagnosticsPanels.show(instance)
     }
 
     private func serialOutputItem() -> NSMenuItem {
@@ -554,6 +575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         sftpBrowsers = browsers
         windowsConnect?.onBrowseFiles = { [weak browsers] in browsers?.browse($0) }
+        windowsConnect?.onDiagnose = { [weak self] in self?.diagnosticsPanels.show($0) }
     }
 
     @objc private func browseSelectedFiles(_ sender: Any?) {
