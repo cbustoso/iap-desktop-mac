@@ -35,6 +35,15 @@ public struct OfflineCredential: Sendable, Codable, Equatable {
 
 extension OfflineCredential: CustomDebugStringConvertible {
     public var debugDescription: String {
-        "OfflineCredential(issuer: \(issuer.rawValue), email: \(email), scopes: \(scopes), issuedAt: \(issuedAt), tokens: <redacted>)"
+        "OfflineCredential(issuer: \(issuer.rawValue), account: \(redactedAccount), scopes: \(scopes), issuedAt: \(issuedAt), tokens: <redacted>)"
+    }
+
+    /// Nunca el email completo ni el subject workforce (REQ-AUTH-6, GH-67):
+    /// para Gaia solo el dominio; para STS, la identidad redactada.
+    var redactedAccount: String {
+        switch issuer {
+        case .gaia: return LogRedaction.emailDomain(email)
+        case .sts: return WorkforceIdentity(principal: email)?.description ?? "<redacted>"
+        }
     }
 }

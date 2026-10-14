@@ -194,6 +194,8 @@ struct RedactionTests {
         let description = credential.debugDescription
         #expect(!description.contains(credential.refreshToken))
         #expect(!description.contains(credential.idToken))
-        #expect(description.contains(credential.email))
+        // GH-67: ni el email completo (REQ-AUTH-6), solo su dominio.
+        #expect(!description.contains(credential.email))
+        #expect(description.contains(LogRedaction.emailDomain(credential.email)))
     }
 }

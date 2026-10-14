@@ -96,7 +96,9 @@ public enum LoginFailure {
         case .tokenExpired:
             return "The session expired. Please sign in again."
         case .workforceNotSupported:
-            return "Workforce identity sign-in is not supported yet."
+            // GH-67: el login workforce existe; lo que no admite workforce es OS Login.
+            return "OS Login does not support workforce identities. "
+                + "Use metadata-based SSH keys for this instance or project."
         case .clientNotConfigured:
             return "This build has no OAuth client ID. Run the IAPDesktopMac.app bundle, "
                 + "or set GOOGLE_OAUTH_CLIENT_ID for development builds."
