@@ -225,7 +225,7 @@ extension GCPClient {
         project: String, zone: String, maximumConcurrentRequests: Int = 8
     ) async throws -> [InstancePackageInventory] {
         let instances = try await aggregatedListInstances(project: project)
-            .filter { $0.zone == zone && $0.operatingSystem != .windows }
+            .filter { $0.zone == zone && $0.operatingSystem == .windows }
         return await collectPackageInventory(
             project: project, instances: instances,
             maximumConcurrentRequests: maximumConcurrentRequests)
@@ -235,7 +235,7 @@ extension GCPClient {
         project: String, maximumConcurrentRequests: Int = 8
     ) async throws -> [InstancePackageInventory] {
         let instances = try await aggregatedListInstances(project: project)
-            .filter { $0.operatingSystem != .windows }
+            .filter { $0.operatingSystem == .windows }
         return await collectPackageInventory(
             project: project, instances: instances,
             maximumConcurrentRequests: maximumConcurrentRequests)

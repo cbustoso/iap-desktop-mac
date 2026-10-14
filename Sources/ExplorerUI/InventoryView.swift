@@ -208,7 +208,7 @@ public final class InventoryWindowController: NSWindowController, NSWindowDelega
                     inventoryView.show(packages: packages)
                     let available = inventories.filter { $0.packages != nil }.count
                     inventoryView.statusLabel.stringValue =
-                        "\(packages.count) packages from \(available) of \(inventories.count) Linux instances"
+                        "\(packages.count) packages from \(available) of \(inventories.count) Windows instances"
                 }
             } catch is CancellationError {
                 return
