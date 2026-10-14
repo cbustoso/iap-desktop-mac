@@ -1,3 +1,4 @@
+import AuthKit
 import Foundation
 import NIOCore
 import NIOPosix
@@ -43,17 +44,21 @@ public struct NIOWebSocketTransport: RelayChannelOpening {
     public var maxFrameSize: Int
     public var proxy: ProxyConfig?
     public var connectTimeout: Duration
+    /// GH-68: certificado de dispositivo para mTLS (`nil` = TLS normal, como antes).
+    public var clientIdentity: DeviceIdentity?
 
     public init(
         userAgent: String = "iap-desktop-mac/0.1",
         maxFrameSize: Int = 1 << 20,
         proxy: ProxyConfig? = nil,
-        connectTimeout: Duration = .seconds(30)
+        connectTimeout: Duration = .seconds(30),
+        clientIdentity: DeviceIdentity? = nil
     ) {
         self.userAgent = userAgent
         self.maxFrameSize = maxFrameSize
         self.proxy = proxy
         self.connectTimeout = connectTimeout
+        self.clientIdentity = clientIdentity
     }
 
     public func open(_ url: URL, accessToken: String) async throws -> any RelayChannel {
@@ -64,6 +69,7 @@ public struct NIOWebSocketTransport: RelayChannelOpening {
         to url: URL, accessToken: String, proxy: ProxyConfig? = nil
     ) async throws -> some RelayChannel {
         guard url.scheme == "wss" || url.scheme == "ws" else { throw TunnelError.invalidURL }
+        let configuration = try webSocketConfiguration()
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let (stream, continuation) = AsyncStream<Data>.makeStream()
         let closeCode = CloseCodeBox()
@@ -85,7 +91,7 @@ public struct NIOWebSocketTransport: RelayChannelOpening {
                     ],
                     proxy: proxy?.host,
                     proxyPort: proxy?.port,
-                    configuration: .init(maxFrameSize: self.maxFrameSize),
+                    configuration: configuration,
                     on: group
                 ) { ws in
                     ws.onBinary { _, buffer in
