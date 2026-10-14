@@ -97,6 +97,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowsConnect: WindowsConnectInterposer?
     /// GH-60: pestañas "Files" (SFTP) por instancia Linux.
     private var sftpBrowsers: SftpBrowsers?
+    /// GH-64: cierre individual de pestañas SSH (×, ⌘W) y de la ventana.
+    private var closeCoordinator: SessionCloseCoordinator?
+    private var windowCloseGuard: WindowCloseGuard?
 
     static func main() {
         let app = NSApplication.shared
@@ -299,6 +302,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// ⌘Q (GH-64): con pestañas abiertas, pasa por el cierre de la ventana
+    /// (confirmación agregada + limpieza); al cerrarse, la app termina sola.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let window = windowController?.window, window.isVisible,
+              !(windowController?.sessionTabs.sessionIdentifiers.isEmpty ?? true)
+        else { return .terminateNow }
+        window.performClose(nil)
+        return .terminateCancel
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true
     }
@@ -332,7 +345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenu("File", [
             item("Add project…", #selector(ExplorerWindowController.addProject(_:)), key: "n"),
             .separator(),
-            item("Close Window", #selector(NSWindow.performClose(_:)), key: "w"),
+            closeItem(),
         ]))
 
         // Edit: necesario para copiar/pegar en el filtro.
@@ -460,6 +473,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// ⌘W contextual (GH-64): en el Explorer con una pestaña SSH activa cierra
+    /// esa pestaña; en cualquier otro caso cierra la ventana clave, como antes.
+    private func closeItem() -> NSMenuItem {
+        let menuItem = item("Close Window", #selector(closeActiveSessionOrWindow(_:)), key: "w")
+        menuItem.target = self
+        return menuItem
+    }
+
+    @objc private func closeActiveSessionOrWindow(_ sender: Any?) {
+        let key = NSApp.keyWindow
+        guard let explorer = windowController?.window, key === explorer, let closeCoordinator else {
+            key?.performClose(sender)
+            return
+        }
+        closeCoordinator.closeActiveSessionOrWindow(title: Self.tabTitle) { explorer.performClose(sender) }
+    }
+
+    /// `project/zone/instance` → `instance`.
+    nonisolated static func tabTitle(_ identifier: String) -> String {
+        identifier.split(separator: "/").last.map(String.init) ?? identifier
+    }
+
     private func signOutItem() -> NSMenuItem {
         let menuItem = item("Sign Out", #selector(signOut(_:)))
         menuItem.target = self
@@ -478,6 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { await session.close() }
         }
         terminalTabs = tabs
+        wireSessionClose(tabs: tabs, windowController: windowController)
         windowController.onConnectRequest = { [weak self] instance in
             self?.connect(to: instance)
         }
@@ -523,6 +559,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func browseSelectedFiles(_ sender: Any?) {
         guard let instance = viewModel.selection, instance.os == .linux else { return }
         sftpBrowsers?.browse(instance)
+    }
+
+    /// GH-64: `×` por pestaña, confirmación y cierre agregado de la ventana.
+    private func wireSessionClose(tabs: TerminalTabManager, windowController: ExplorerWindowController) {
+        let host = windowController.sessionTabs
+        let confirmer = SessionCloseConfirmer.live(tabs: tabs) { [weak self] instanceID in
+            self?.sftpBrowsers?.hasActiveTransfer(instanceID: instanceID) ?? false
+        }
+        let coordinator = SessionCloseCoordinator(
+            tabs: tabs, host: host, confirmer: confirmer,
+            ask: SessionCloseCoordinator.alertAsk { [weak windowController] in windowController?.window })
+        closeCoordinator = coordinator
+        host.onCloseRequested = { [weak self, weak host] identifier in
+            guard let self else { return }
+            if coordinator.isSessionTab(identifier) {
+                Task { await coordinator.requestClose(instanceID: identifier, title: Self.tabTitle(identifier)) }
+            } else if self.sftpBrowsers?.isFilesTab(identifier) == true {
+                self.sftpBrowsers?.close(identifier)
+            } else {
+                host?.closeSession(identifier: identifier)
+            }
+        }
+        let closeGuard = WindowCloseGuard { [weak self, weak host] window in
+            coordinator.windowShouldClose(
+                hasOtherTabs: !(host?.sessionIdentifiers.allSatisfy(coordinator.isSessionTab) ?? true),
+                closeOthers: { self?.sftpBrowsers?.closeAll() },
+                reclose: { window.close() })
+        }
+        windowCloseGuard = closeGuard
+        windowController.window?.delegate = closeGuard
     }
 
     private func wireVmControl() {
@@ -743,4 +809,12 @@ enum MockWorkspace {
             ]),
         ]
     }
+}
+
+/// Delegado de la ventana del Explorer solo para `windowShouldClose` (GH-64).
+@MainActor
+final class WindowCloseGuard: NSObject, NSWindowDelegate {
+    private let shouldClose: @MainActor (NSWindow) -> Bool
+    init(shouldClose: @escaping @MainActor (NSWindow) -> Bool) { self.shouldClose = shouldClose }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { shouldClose(sender) }
 }

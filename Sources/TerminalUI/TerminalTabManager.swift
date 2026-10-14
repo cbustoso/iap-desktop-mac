@@ -41,9 +41,9 @@ public final class TerminalTabManager {
         }
 
         let view = TerminalSessionView(backend: backend)
-        view.onEnded = { [weak self] in
+        view.onEnded = { [weak self, weak view] in
             self?.host.setSessionTitle("\(title) — desconectado", identifier: instanceID)
-            self?.onSessionEnded?(instanceID)
+            if let view { self?.notifyEnded(instanceID, view: view) }
         }
         views[instanceID] = view
         titles[instanceID] = title
@@ -73,12 +73,23 @@ public final class TerminalTabManager {
     }
 
     /// Cierre limpio: cierra el canal remoto y quita la pestaña.
+    /// Idempotente: una segunda llamada (o una carrera con el fin remoto) no
+    /// hace nada ni repite `onSessionEnded`. La pestaña se quita antes de
+    /// cerrar el canal, así que un fallo del canal no la deja en la UI.
     public func close(instanceID: String) async {
         guard let view = views.removeValue(forKey: instanceID) else { return }
         titles[instanceID] = nil
         view.onEnded = nil
         host.closeSession(identifier: instanceID)
         await view.close()
+        notifyEnded(instanceID, view: view)
+    }
+
+    /// `onSessionEnded` como mucho una vez por pestaña (GH-64), aunque el
+    /// remoto termine y luego se pulse `×`.
+    private func notifyEnded(_ instanceID: String, view: TerminalSessionView) {
+        guard !view.endNotified else { return }
+        view.endNotified = true
         onSessionEnded?(instanceID)
     }
 
