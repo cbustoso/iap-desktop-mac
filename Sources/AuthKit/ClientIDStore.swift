@@ -4,10 +4,12 @@ import Foundation
 ///
 /// Orden de resolución (CBU-36):
 /// 1. `UserDefaults` (`oauth.clientID`): override manual guardado desde la UI.
-/// 2. `Info.plist` (`OAuthClientID`): valor por defecto embebido por el
-///    maintainer. El placeholder `__OAUTH_CLIENT_ID__` (o vacío) cuenta como
-///    ausente.
-/// 3. Entorno `GOOGLE_OAUTH_CLIENT_ID` (desarrollo / `swift run`).
+/// 2. `Info.plist` (`OAuthClientID`): solo para builds de distribución que lo
+///    inyecten al empaquetar. En el repo es el placeholder `__OAUTH_CLIENT_ID__`
+///    (GH-80: nada de secretos embebidos), que cuenta como ausente.
+/// 3. Entorno `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`.
+/// 4. Fichero local `~/.config/iap-desktop-mac/secrets.env` (solo si existe;
+///    ver `LocalSecretsFile`). El entorno manda sobre el fichero, clave a clave.
 public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertible {
     public static let defaultsKey = "oauth.clientID"
     public static let infoPlistKey = "OAuthClientID"
@@ -16,6 +18,8 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
     public static let secretEnvironmentKey = "GOOGLE_OAUTH_CLIENT_SECRET"
     /// Valor de `Info.plist` que significa "sin client ID embebido".
     public static let bundlePlaceholder = "__OAUTH_CLIENT_ID__"
+    /// Valor de `Info.plist` que significa "sin client secret embebido".
+    public static let secretBundlePlaceholder = "__OAUTH_CLIENT_SECRET__"
     /// Dónde crear un client ID de tipo "Desktop app".
     public static let cloudConsoleCredentialsURL = URL(
         string: "https://console.cloud.google.com/apis/credentials")!
@@ -31,12 +35,14 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
             as? String,
         bundledClientSecret: String? = Bundle.main.object(forInfoDictionaryKey: ClientIDStore.secretPlistKey)
             as? String,
-        environment: [String: String] = ProcessInfo.processInfo.environment
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        secretsFile: URL? = LocalSecretsFile.defaultURL()
     ) {
         self.defaults = defaults
         self.bundledClientID = bundledClientID
         self.bundledClientSecret = bundledClientSecret
-        self.environment = environment
+        let fileValues = secretsFile.map(LocalSecretsFile.load(from:)) ?? [:]
+        self.environment = fileValues.merging(environment) { _, explicit in explicit }
     }
 
     @discardableResult
@@ -46,7 +52,8 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
         return clientID
     }
 
-    /// Client ID efectivo. Lanza `userCancelled` si no hay ninguno y
+    /// Client ID efectivo. Lanza `userCancelled` si no hay ninguno (la UI
+    /// muestra entonces `missingConfigurationMessage`) y
     /// `invalidResponse` si la fuente que manda tiene un valor mal formado.
     public func resolve() throws -> String {
         if let stored = defaults.string(forKey: Self.defaultsKey) {
@@ -79,11 +86,11 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
         return try save(typed)
     }
 
-    /// Client secret efectivo (Info.plist → entorno). Sin UserDefaults: el
-    /// secret acompaña al bundle, no se edita desde la UI. `nil` si ausente.
+    /// Client secret efectivo (Info.plist → entorno → fichero local). Sin
+    /// UserDefaults: no se edita desde la UI. `nil` si ausente.
     public func clientSecret() -> String? {
         if let bundled = bundledClientSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !bundled.isEmpty {
+           !bundled.isEmpty, bundled != Self.secretBundlePlaceholder {
             return bundled
         }
         if let environmentValue = environment[Self.secretEnvironmentKey]?
@@ -93,6 +100,20 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
         }
         return nil
     }
+
+    /// Qué falta para poder iniciar sesión (`nil` = nada). Los clients
+    /// "Desktop app" de Google exigen también el secret en `/token`.
+    public var missingConfiguration: MissingClientConfiguration? {
+        guard isConfigured else { return .clientID }
+        return clientSecret() == nil ? .clientSecret : nil
+    }
+
+    /// Mensaje accionable (sin valores) para cuando falta configuración.
+    public static let missingConfigurationMessage = """
+        No OAuth client configured. Set GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET \
+        in the environment or in ~/.config/iap-desktop-mac/secrets.env (see docs/usage.md), \
+        or paste a Desktop app client ID in the Sign In window.
+        """
 
     /// Borra el override manual (vuelve al default embebido / entorno).
     public func clearOverride() {
@@ -118,5 +139,20 @@ public struct ClientIDStore: CustomStringConvertible, CustomDebugStringConvertib
             throw AuthError.invalidResponse
         }
         return clientID
+    }
+}
+
+/// Pieza de configuración OAuth que falta (GH-80).
+public enum MissingClientConfiguration: Sendable, Equatable {
+    case clientID
+    case clientSecret
+
+    public var message: String {
+        switch self {
+        case .clientID: return ClientIDStore.missingConfigurationMessage
+        case .clientSecret:
+            return "OAuth client secret missing: set GOOGLE_OAUTH_CLIENT_SECRET in the environment "
+                + "or in ~/.config/iap-desktop-mac/secrets.env (see docs/usage.md)."
+        }
     }
 }

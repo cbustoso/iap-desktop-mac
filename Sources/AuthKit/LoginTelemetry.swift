@@ -64,7 +64,7 @@ public enum AutoLoadFailure: Sendable, Equatable {
     /// El refresh token guardado es de otro cliente OAuth (`unauthorized_client`):
     /// hay que volver a iniciar sesión con el cliente actual.
     case sessionFromOtherClient
-    /// Este build no tiene client ID (binario sin Info.plist): no se llamó a Google.
+    /// Sin client ID configurado (GH-80: el bundle no lo embebe): no se llamó a Google.
     case clientNotConfigured
     /// Otro tipo de error (solo se conserva el nombre del tipo).
     case unknown(String)
@@ -137,7 +137,7 @@ public enum AutoLoadFailure: Sendable, Equatable {
         case .sessionFromOtherClient:
             return "La sesión guardada es de otro cliente OAuth: vuelve a iniciar sesión."
         case .clientNotConfigured:
-            return "Este build no tiene client ID OAuth (binario sin Info.plist): abre IAPDesktopMac.app."
+            return "Sin client OAuth: define GOOGLE_OAUTH_CLIENT_ID/SECRET o ~/.config/iap-desktop-mac/secrets.env (docs/usage.md)."
         case .unknown: return "No se pudieron cargar los proyectos."
         }
     }

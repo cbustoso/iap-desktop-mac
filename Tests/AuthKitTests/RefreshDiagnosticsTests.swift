@@ -44,7 +44,7 @@ struct RefreshDiagnosticsTests {
     @Test func configuredClientStillReachesTheNetwork() async {
         CountingProtocol.requests = 0
         let client = TokenClient(
-            clientID: "123456789-test.apps.googleusercontent.com", session: countingSession())
+            clientID: "123456789012-placeholder.apps.googleusercontent.com", session: countingSession())
         await #expect(throws: AuthError.self) { _ = try await client.refresh(refreshToken: "1//refresh") }
         #expect(CountingProtocol.requests == 1)
     }
@@ -60,9 +60,9 @@ struct RefreshDiagnosticsTests {
     }
 
     @Test func clientIDPrefixIsShortAndNeverTheFullID() {
-        let full = "YOUR-CLIENT-ID.apps.googleusercontent.com"
+        let full = "123456789012-placeholder.apps.googleusercontent.com"
         let prefix = LogRedaction.clientIDPrefix(full)
-        #expect(prefix == "92005266…")
+        #expect(prefix == "12345678…")
         #expect(!prefix.contains("apps.googleusercontent.com"))
         #expect(LogRedaction.clientIDPrefix("") == "<empty>")
         #expect(LogRedaction.clientIDPrefix("  ") == "<empty>")
@@ -80,12 +80,13 @@ struct RefreshDiagnosticsTests {
             httpStatus: nil, urlErrorCode: nil, authError: .clientNotConfigured, typeName: "AuthError")
         #expect(noClient == .clientNotConfigured)
         #expect(noClient.logCause == "cause=no_client_id")
-        #expect(noClient.userNote.contains(".app"))
+        #expect(noClient.userNote.contains("secrets.env"))
     }
 
     @Test func loginMessageForMissingClientIsActionable() {
         let message = LoginFailure.message(for: AuthError.clientNotConfigured, at: .exchangingCode)
-        #expect(message.contains("IAPDesktopMac.app"))
         #expect(message.contains("GOOGLE_OAUTH_CLIENT_ID"))
+        #expect(message.contains("GOOGLE_OAUTH_CLIENT_SECRET"))
+        #expect(message.contains("secrets.env"))
     }
 }

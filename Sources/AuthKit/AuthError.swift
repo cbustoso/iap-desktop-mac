@@ -25,7 +25,7 @@ public enum AuthError: Error, Sendable, Equatable {
     case idTokenWithoutEmail
     /// Sin `refresh_token`: no se puede guardar la sesión offline.
     case missingRefreshToken
-    /// Este build no tiene client ID (p. ej. binario SwiftPM sin Info.plist):
+    /// No hay client ID (ni entorno, ni `secrets.env`, ni override, ni bundle):
     /// se falla en local en vez de mandar `client_id` vacío a Google (CBU-28e).
     case clientNotConfigured
 }
@@ -100,8 +100,7 @@ public enum LoginFailure {
             return "OS Login does not support workforce identities. "
                 + "Use metadata-based SSH keys for this instance or project."
         case .clientNotConfigured:
-            return "This build has no OAuth client ID. Run the IAPDesktopMac.app bundle, "
-                + "or set GOOGLE_OAUTH_CLIENT_ID for development builds."
+            return ClientIDStore.missingConfigurationMessage
         }
     }
 
