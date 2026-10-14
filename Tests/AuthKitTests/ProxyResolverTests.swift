@@ -1,4 +1,6 @@
-// GH-69: proxy corporativo (AuthKit). Todo stub: ninguna llamada toca
+// GH-69/GH-70: proxy corporativo — suite ÚNICA del núcleo de `ProxyResolver`
+// (compartido por AuthKit y TunnelKit; el adaptador de TunnelKit se prueba en
+// `TunnelKitTests/ProxyResolverTests.swift`). Todo stub: ninguna llamada toca
 // CFNetwork del sistema real ni la red (ni `URLSession.shared` ni
 // `CFNetworkCopySystemProxySettings`/`CFNetworkExecuteProxyAutoConfigurationScript`
 // reales) — se inyectan las cuatro dependencias de `ProxyResolver`
@@ -36,6 +38,9 @@ private final class URLLog: @unchecked Sendable {
     private(set) var urls: [URL] = []
     func append(_ url: URL) { urls.append(url) }
 }
+
+/// Destino del túnel (consumidor TunnelKit): el núcleo es el mismo.
+private let tunnelURL = URL(string: "wss://tunnel.cloudproxy.app/v4/connect?project=p&zone=z&instance=i&interface=nic0&port=22")!
 
 @Suite("ProxyResolver (AuthKit, GH-69)")
 struct ProxyResolverAuthKitTests {
@@ -179,6 +184,54 @@ struct ProxyResolverAuthKitTests {
         let result = await resolver.resolve(for: URL(string: "https://sts.googleapis.com")!)
         #expect(result == .direct)
     }
+
+    // MARK: - Casos que solo cubría la copia de TunnelKit (GH-70: unificados)
+
+    @Test func privateServiceConnectBypassesForTheTunnelDestinationToo() async {
+        let calls = CallCounter()
+        let resolver = ProxyResolver(
+            systemSettings: { calls.increment(); return [:] },
+            proxiesForURL: { _, _ in [httpsEntry] })
+        #expect(await resolver.resolve(for: tunnelURL, destination: .privateServiceConnect) == .direct)
+        #expect(calls.count == 0)  // paridad `Options.Proxy=null si PSC` del WebSocket
+    }
+
+    @Test func pacIsExecutedAgainstTheRequestedDestinationURL() async {
+        nonisolated(unsafe) let pacEntry: [AnyHashable: Any] = [
+            ProxyResolver.typeKey: "kCFProxyTypeAutoConfigurationJavaScript",
+            ProxyResolver.pacJavaScriptKey: "function FindProxyForURL(url, host) { return 'PROXY 10.0.0.1:3128'; }",
+        ]
+        let resolver = ProxyResolver(
+            systemSettings: { [:] },
+            proxiesForURL: { _, _ in [pacEntry] },
+            executePAC: { _, target in
+                #expect(target == tunnelURL)
+                return [entry(type: "kCFProxyTypeHTTP", host: "10.0.0.1", port: 3128)]
+            })
+        #expect(await resolver.resolve(for: tunnelURL) == .http(host: "10.0.0.1", port: 3128))
+    }
+
+    @Test func pacURLGivenAsStringIsAlsoFetched() async {
+        // `CFNetworkCopyProxiesForURL` puede devolver la URL del PAC como
+        // `String` (no `URL`) según la versión del SO.
+        nonisolated(unsafe) let pacEntry: [AnyHashable: Any] = [
+            ProxyResolver.typeKey: "kCFProxyTypeAutoConfigurationURL",
+            ProxyResolver.pacURLKey: "https://intranet.corp.local/proxy.pac",
+        ]
+        let fetchedURLs = URLLog()
+        let resolver = ProxyResolver(
+            systemSettings: { [:] },
+            proxiesForURL: { _, _ in [pacEntry] },
+            fetchPACScript: { url in
+                fetchedURLs.append(url)
+                return "function FindProxyForURL(url, host) { return 'PROXY 10.0.0.1:3128'; }"
+            },
+            executePAC: { _, _ in [entry(type: "kCFProxyTypeHTTPS", host: "10.0.0.1", port: 3128)] })
+        #expect(await resolver.resolve(for: tunnelURL) == .https(host: "10.0.0.1", port: 3128))
+        #expect(fetchedURLs.urls == [URL(string: "https://intranet.corp.local/proxy.pac")!])
+    }
+
+    // MARK: - Adaptador AuthKit (`URLSessionConfiguration`)
 
     @Test func connectionProxyDictionaryShapeMatchesURLSessionConfigurationExpectations() {
         #expect(ResolvedProxy.direct.connectionProxyDictionary.isEmpty)
