@@ -91,22 +91,22 @@ struct GuestInventoryTests {
 
     @Test func zoneFanOutIsThrottledFiltersWindowsAndKeepsFailures() async throws {
         let probe = ConcurrencyProbe()
-        let linuxInstances: [[String: Any]] = (0..<9).map { index in
+        let windowsInstances: [[String: Any]] = (0..<9).map { index in
             [
-                "name": "linux-\(index)", "zone": "zones/us-central1-a", "status": "RUNNING",
-                "disks": [["licenses": ["projects/debian-cloud/global/licenses/debian-12"]]],
+                "name": "windows-\(index)", "zone": "zones/us-central1-a", "status": "RUNNING",
+                "disks": [["licenses": ["projects/windows-cloud/global/licenses/windows-2022"]]],
             ]
         }
-        let windows: [String: Any] = [
-            "name": "windows-0", "zone": "zones/us-central1-a", "status": "RUNNING",
-            "disks": [["licenses": ["projects/windows-cloud/global/licenses/windows-2022"]]],
-        ]
-        let otherZone: [String: Any] = [
-            "name": "other-zone", "zone": "zones/us-east1-b", "status": "RUNNING",
+        let linux: [String: Any] = [
+            "name": "linux-0", "zone": "zones/us-central1-a", "status": "RUNNING",
             "disks": [["licenses": ["projects/debian-cloud/global/licenses/debian-12"]]],
         ]
+        let otherZone: [String: Any] = [
+            "name": "windows-other-zone", "zone": "zones/us-east1-b", "status": "RUNNING",
+            "disks": [["licenses": ["projects/windows-cloud/global/licenses/windows-2022"]]],
+        ]
         let aggregatedResponse = responseData([
-            "items": ["zones/us-central1-a": ["instances": linuxInstances + [windows]],
+            "items": ["zones/us-central1-a": ["instances": windowsInstances + [linux]],
                       "zones/us-east1-b": ["instances": [otherZone]]],
         ])
         let client = inventoryClient { request in
@@ -117,7 +117,7 @@ struct GuestInventoryTests {
             probe.begin(instance: instance)
             Thread.sleep(forTimeInterval: 0.025)
             probe.end()
-            if instance == "linux-4" {
+            if instance == "windows-4" {
                 return (403, responseData(["error": ["status": "PERMISSION_DENIED"]]))
             }
             return (200, responseData([
@@ -131,12 +131,49 @@ struct GuestInventoryTests {
         let results = try await client.collectZonePackageInventory(
             project: "p", zone: "us-central1-a", maximumConcurrentRequests: 3)
 
-        #expect(results.map(\.instance) == (0..<9).map { "linux-\($0)" })
-        #expect(results.first { $0.instance == "linux-4" }?.packages == nil)
+        #expect(results.map(\.instance) == (0..<9).map { "windows-\($0)" })
+        #expect(results.first { $0.instance == "windows-4" }?.packages == nil)
         #expect(results.filter { $0.packages != nil }.count == 8)
         #expect(probe.maximum > 1)
         #expect(probe.maximum <= 3)
-        #expect(!probe.requestedInstances.contains("windows-0"))
-        #expect(!probe.requestedInstances.contains("other-zone"))
+        #expect(!probe.requestedInstances.contains("linux-0"))
+        #expect(!probe.requestedInstances.contains("windows-other-zone"))
+    }
+
+    @Test func projectFanOutIncludesWindowsFromEveryZone() async throws {
+        let aggregatedResponse = responseData([
+            "items": [
+                "zones/us-central1-a": ["instances": [[
+                    "name": "windows-a", "zone": "zones/us-central1-a", "status": "RUNNING",
+                    "disks": [["licenses": ["projects/windows-cloud/global/licenses/windows-2022"]]],
+                ]]],
+                "zones/us-east1-b": ["instances": [
+                    [
+                        "name": "windows-b", "zone": "zones/us-east1-b", "status": "RUNNING",
+                        "disks": [["licenses": ["projects/windows-cloud/global/licenses/windows-2022"]]],
+                    ],
+                    [
+                        "name": "linux-b", "zone": "zones/us-east1-b", "status": "RUNNING",
+                        "disks": [["licenses": ["projects/debian-cloud/global/licenses/debian-12"]]],
+                    ],
+                ]],
+            ],
+        ])
+        let client = inventoryClient { request in
+            if request.url?.path.contains("/aggregated/instances") == true {
+                return (200, aggregatedResponse)
+            }
+            return (200, responseData([
+                "queryValue": ["items": [[
+                    "namespace": "guestInventory", "key": "InstalledPackages",
+                    "value": inventoryPayload,
+                ]]],
+            ]))
+        }
+
+        let results = try await client.collectProjectPackageInventory(project: "p")
+
+        #expect(results.map(\.instance) == ["windows-a", "windows-b"])
+        #expect(results.allSatisfy { $0.packages?.count == 3 })
     }
 }
