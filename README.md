@@ -1,5 +1,10 @@
 # IAP Desktop Mac
 
+> **Aviso**: proyecto comunitario, sin afiliación con Google. Build de desarrollo
+> **sin firmar** (macOS pedirá confirmación al abrir). El login requiere tu propio
+> OAuth client de tipo *Desktop app* (ver `docs/usage.md`): no se distribuyen
+> credenciales. Úsalo bajo tu responsabilidad.
+
 **IAP Desktop Mac** es un cliente nativo de macOS para administrar instancias de
 Google Compute Engine a través de [Identity-Aware Proxy
 (IAP)](https://cloud.google.com/iap/docs/tcp-forwarding-overview) TCP forwarding,
