@@ -66,6 +66,9 @@ public enum ProfileError: Error, Sendable, Equatable {
     case notFound(ProfileID)
     case migrationVerificationFailed
     case keychainNamespaceFailure(OSStatus)
+    /// GH-74: tras varios pases siguen apareciendo entradas del perfil (o no
+    /// se pudo confirmar el borrado): el perfil NO se da por purgado.
+    case keychainPurgeIncomplete
     /// Borrar un perfil con su ventana abierta: hay que cerrarla antes.
     case cannotRemoveActiveProfileWindow
 }
@@ -197,13 +200,12 @@ public struct ProfileEnvironment: Sendable, Equatable {
     /// las entradas Keychain cuyo servicio es de este perfil y sus suites de
     /// client ID/proyectos. Nunca toca ubicaciones legadas ni otros perfiles.
     public func purge() throws {
+        try purge(keychain: .system)
+    }
+
+    func purge(keychain: KeychainNamespaceAccess) throws {
         guard !usesLegacyLocations else { return }
-        for service in try Self.genericPasswordServices() where Self.belongs(service, to: id) {
-            let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw ProfileError.keychainNamespaceFailure(status)
-            }
-        }
+        try Self.purgeKeychain(of: id, knownServices: [authKeychainService], keychain: keychain)
         for suite in [clientIDSuite, explorerSuite].compactMap({ $0 }) {
             UserDefaults.standard.removePersistentDomain(forName: suite)
         }
@@ -213,6 +215,47 @@ public struct ProfileEnvironment: Sendable, Equatable {
     static func belongs(_ service: String, to id: ProfileID) -> Bool {
         let marker = ".profile.\(id.rawValue)"
         return service.hasSuffix(marker) || service.contains(marker + ".")
+    }
+
+    /// Pases máximos y lecturas limpias seguidas exigidas para dar el perfil por purgado.
+    static let purgeMaxPasses = 10
+    static let purgeConfirmations = 3
+
+    /// GH-74: la enumeración global (`kSecMatchLimitAll`) del Keychain de login
+    /// NO es una foto consistente: con escrituras concurrentes (otros hilos o
+    /// procesos) puede omitir entradas que existen y que una consulta directa
+    /// sí encuentra. Una sola lectura vacía no prueba nada, así que:
+    /// 1. los servicios conocidos (auth) se borran directamente, sin enumerar;
+    /// 2. el resto (settings sensibles, componentes no conocidos de antemano)
+    ///    se enumera y borra en pases hasta `purgeConfirmations` lecturas
+    ///    limpias seguidas; si no se confirma, se lanza error en vez de dar por
+    ///    borrado lo que quizá sigue ahí.
+    /// Límite: `purgeConfirmations` lecturas falsamente vacías seguidas (con
+    /// 50 ms entre ellas) engañarían al purge; medido bajo carga, la omisión
+    /// dura una lectura y la relectura a 50 ms ya ve la entrada.
+    static func purgeKeychain(of id: ProfileID, knownServices: [String], keychain: KeychainNamespaceAccess) throws {
+        for service in knownServices { try keychain.delete(service) }
+        var cleanReads = 0
+        for _ in 0..<purgeMaxPasses {
+            let remaining = try keychain.services().filter { belongs($0, to: id) }
+            if remaining.isEmpty {
+                cleanReads += 1
+                if cleanReads >= purgeConfirmations { return }
+            } else {
+                cleanReads = 0
+                for service in remaining { try keychain.delete(service) }
+            }
+            keychain.pause()
+        }
+        ProfileStore.log.error("profile purge unconfirmed passes=\(purgeMaxPasses, privacy: .public)")
+        throw ProfileError.keychainPurgeIncomplete
+    }
+
+    static func deleteGenericPasswords(service: String) throws {
+        let status = SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service] as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ProfileError.keychainNamespaceFailure(status)
+        }
     }
 
     static func genericPasswordServices() throws -> [String] {
@@ -229,6 +272,19 @@ public struct ProfileEnvironment: Sendable, Equatable {
         }
         return Array(Set(list.compactMap { $0[kSecAttrService as String] as? String }))
     }
+}
+
+/// Operaciones de Keychain que usa `ProfileEnvironment.purge` (inyectables
+/// para probar la enumeración incompleta sin depender del timing real).
+struct KeychainNamespaceAccess: Sendable {
+    var services: @Sendable () throws -> [String]
+    var delete: @Sendable (_ service: String) throws -> Void
+    var pause: @Sendable () -> Void
+
+    static let system = KeychainNamespaceAccess(
+        services: ProfileEnvironment.genericPasswordServices,
+        delete: ProfileEnvironment.deleteGenericPasswords(service:),
+        pause: { Thread.sleep(forTimeInterval: 0.05) })
 }
 
 /// Sesiones vivas por perfil (una por ventana abierta). Genérico para poder
