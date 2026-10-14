@@ -1,107 +1,22 @@
 import AppKit
 import AuthKit
-import OSLog
-import RDPBridge
-import SFTPKit
 import ExplorerUI
 import GCPClient
-import SSHKit
-import TerminalUI
-import TunnelKit
+import OSLog
+import RDPBridge
 
 /// Punto de entrada AppKit (sin SwiftUI: esta máquina compila con CLT).
+///
+/// GH-72: el delegado ya no es "la sesión": posee un `ProfileCoordinator` con
+/// una `ProfileSession` (fachada, GCPClient, ventana, pestañas, SSH/RDP/SFTP)
+/// por perfil abierto. Las acciones de menú se reenvían al perfil del frente.
 @main
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
-    private var windowController: ExplorerWindowController?
-    private var loginWindowController: LoginWindowController?
-    private var settingsPanelController: SettingsPanelWindowController?
-    private let credentialFacade = CredentialFacade()
-    private let viewModel = ExplorerViewModel(projects: MockWorkspace.sample())
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var coordinator: ProfileCoordinator!
+    private let profilesMenu = NSMenu(title: "Profiles")
 
-    /// Tokens reales vía fachada (con refresh automático). Al arrancar sin
-    /// sesión expira al primer uso y el árbol conserva el mock (fallback).
-    private lazy var workspace = ProjectWorkspace(client: GCPClient(tokenProvider: accessToken))
-    private lazy var vmClient = GCPClient(tokenProvider: accessToken)
-    private var serialOutputPanels: [String: SerialOutputWindowController] = [:]
-    /// GH-65: diagnóstico de conectividad IAP.
-    private lazy var diagnosticsPanels = DiagnosticsPanels(client: vmClient, accessToken: accessToken)
-    private var eventLogPanels: [String: EventLogWindowController] = [:]
-    private var inventoryPanels: [String: InventoryWindowController] = [:]
-
-    /// Token OAuth de la sesión activa (refresh automático vía fachada).
-    /// Compartido por Compute, OS Login y el túnel IAP; nunca se registra.
-    private lazy var accessToken: @Sendable () async throws -> String = {
-        let facade = self.credentialFacade
-        return {
-            // Token vigente: sin refresh, sin traza.
-            if let token = try? await facade.validAccessToken() { return token }
-            let store = ClientIDStore()
-            do {
-                // Nunca `client_id` vacío (antes `?? ""`): Google respondía
-                // "Could not determine client ID from request" (CBU-28e).
-                guard let clientID = try? store.resolve() else { throw AuthError.clientNotConfigured }
-                let token = try await TokenRefresher().refreshedAccessToken(
-                    facade: facade,
-                    client: TokenClient(clientID: clientID, clientSecret: store.clientSecret()))
-                AppDelegate.log.notice("token refresh succeeded \(BuildInfo.current, privacy: .public)")
-                return token
-            } catch {
-                // Sin tokens ni codes: solo la causa clasificada.
-                AppDelegate.log.error("""
-                    token refresh failed \(AppDelegate.diagnose(error).logCause, privacy: .public) \
-                    \(BuildInfo.current, privacy: .public)
-                    """)
-                throw error
-            }
-        }
-    }()
-
-    /// Traza de login, refresh y auto-carga (subsystem existente, categoría login).
     nonisolated static let log = Logger(subsystem: "com.iapdesktop.mac", category: "login")
-
-    // MARK: SSH vía IAP (CBU-44)
-
-    /// Host keys aceptadas en esta ejecución (TOFU provisional hasta T-SSH-7).
-    private let knownHosts = InMemoryKnownHosts()
-    private var terminalTabs: TerminalTabManager?
-    /// Conexión SSH de cada pestaña (se cierra al terminar o cerrar la pestaña).
-    private var sshSessions: [String: SshSession] = [:]
-    private var connecting: Set<String> = []
-
-    private lazy var sshConnector: SshConnector = {
-        let facade = credentialFacade
-        let knownHosts = self.knownHosts
-        let services = GCPSshCredentialServices(
-            client: GCPClient(tokenProvider: accessToken),
-            email: { await facade.currentEmail })
-        return SshConnector(
-            accessToken: accessToken,
-            resolver: CredentialResolver(
-                osLoginStatusProvider: services,
-                osLoginAuthorizer: services,
-                metadataPublisher: services),
-            hostKeys: { knownHosts.policy(for: $0) },
-            emailHint: { await facade.currentEmail ?? "" })
-    }()
-
-    // MARK: RDP vía fallback .rdp + Windows App (CBU-52)
-
-    private lazy var rdpFlow: RdpConnectFlow = {
-        let facade = credentialFacade
-        return RdpConnectFlow(
-            client: vmClient,
-            tunnels: IapRdpTunnels(accessToken: accessToken),
-            email: { await facade.currentEmail },
-            window: { [weak self] in self?.windowController?.window },
-            note: { [weak self] in self?.windowController?.statusNote = $0 })
-    }()
-    private var windowsConnect: WindowsConnectInterposer?
-    /// GH-60: pestañas "Files" (SFTP) por instancia Linux.
-    private var sftpBrowsers: SftpBrowsers?
-    /// GH-64: cierre individual de pestañas SSH (×, ⌘W) y de la ventana.
-    private var closeCoordinator: SessionCloseCoordinator?
-    private var windowCloseGuard: WindowCloseGuard?
 
     static func main() {
         let app = NSApplication.shared
@@ -114,140 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMenu()
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
-        windowController = ExplorerWindowController(viewModel: viewModel, dataSourceLabel: "MOCK")
-        windowController?.onAddProject = { [weak self] in self?.addProjectDialog(nil) }
-        let settingsDataSource = ApplicationSettingsDataSource { [weak self] in
-            self?.viewModel.projects ?? []
-        }
-        let settingsPanel = SettingsPanelWindowController(dataSource: settingsDataSource)
-        settingsPanelController = settingsPanel
-        windowController?.onOpenSettings = { [weak settingsPanel] scope in
-            settingsPanel?.show(preferredScope: scope)
-        }
-        wireSshConnect()
-        wireVmControl()
-        wireRdpConnect()
-        wireInventory()
-        windowController?.showWindow(nil)
-        wireRefreshAction()
+        // REQ-MT-5: migración una sola vez, antes de abrir ningún perfil. En
+        // modo snapshot no se toca Keychain: perfil legado sin restaurar.
+        let snapshot = ProcessInfo.processInfo.environment["IAP_SNAPSHOT"] != nil
+        let migrator = ProfileMigrator()
+        if !snapshot { migrator.migrateLegacySingleProfileIfNeeded() }
+        coordinator = ProfileCoordinator(migrationCompleted: !snapshot && migrator.isCompleted)
+        coordinator.activate(snapshot ? .legacyDefault : coordinator.initialProfile)
         app.activate()
-        restoreSessionAndLoad()
         snapshotIfRequested()
     }
 
-    /// Como el IAP original: al arrancar restaura la sesión del Keychain y
-    /// carga proyectos/instancias automáticamente; tras cada login/logout
-    /// (evento Reauthorized) recarga si hay sesión. Sin sesión o con fallo,
-    /// el árbol conserva el mock visible.
-    private func restoreSessionAndLoad() {
-        // Modo snapshot (tools/snapshot.sh, SnapshotSmokeTests): sin Keychain
-        // ni red. Antes cada `swift test` restauraba la sesión real del
-        // usuario e intentaba un refresh desde el binario suelto (CBU-28e).
-        guard ProcessInfo.processInfo.environment["IAP_SNAPSHOT"] == nil else {
-            Self.log.notice("autoload skipped reason=snapshot \(BuildInfo.current, privacy: .public)")
-            return
-        }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.restoreSession()
-            await self.refreshAccount()
-            self.observeSession()
-            await self.loadLiveData(trigger: "launch")
-        }
-    }
-
-    private func restoreSession() async {
-        let store = KeychainStore()
-        guard
-            let accounts = try? store.accounts(),
-            let first = accounts.first,
-            let credential = try? store.load(issuer: first.issuer, email: first.email)
-        else { return }
-        await credentialFacade.restoreOffline(credential)
-    }
-
-    private func observeSession() {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            for await _ in await self.credentialFacade.reauthorized() {
-                await self.refreshAccount()
-                if await self.credentialFacade.currentEmail != nil {
-                    await self.loadLiveData(trigger: "reauthorized")
-                } else {
-                    // Logout: la nota hablaba de la sesión anterior.
-                    self.windowController?.statusNote = ""
-                }
-            }
-        }
-    }
-
-    /// Cuenta en la status bar (email completo en la UI; en logs solo dominio).
-    private func refreshAccount() async {
-        windowController?.showAccount(email: await credentialFacade.currentEmail)
-    }
-
-    /// Auto-carga de proyectos e instancias. Deja traza del resultado y, si
-    /// falla (401, IAM, red…), lo muestra en la status bar en vez de dejar el
-    /// mock en silencio. Sin permiso para listar (403), usa los proyectos
-    /// añadidos manualmente (paridad: picker Add project del original).
-    private func loadLiveData(trigger: String) async {
-        Self.log.notice("autoload started trigger=\(trigger, privacy: .public) \(BuildInfo.current, privacy: .public)")
-        switch await viewModel.reloadAllowingStored(workspace: workspace, stored: knownProjectIDs) {
-        case .success(let discovered):
-            Self.log.notice("""
-                autoload loaded discovered=\(discovered, privacy: .public) \
-                projects=\(self.viewModel.projectCount, privacy: .public) \
-                instances=\(self.viewModel.instanceCount, privacy: .public) \(BuildInfo.current, privacy: .public)
-                """)
-            guard !discovered else {
-                windowController?.statusNote = ""
-                return
-            }
-            // CBU-47b: el motivo del 403 ya no se traga en el fallback.
-            let discoveryFailure = await workspace.lastDiscoveryFailure
-            Self.log.error("""
-                discovery failed \(discoveryFailure?.logDescription ?? "cause=unknown", privacy: .public) \
-                activation=\(discoveryFailure?.activationURL == nil ? "-" : "present", privacy: .public) \
-                \(BuildInfo.current, privacy: .public)
-                """)
-            windowController?.statusNote = ProjectWorkspace.discoveryNote(
-                for: discoveryFailure, shown: knownProjectIDs.count)
-        case .failure(let error):
-            let failure = Self.diagnose(error)
-            let detail = (error as? GoogleAPIFailure).map { " \($0.logDescription)" } ?? ""
-            Self.log.error("autoload failed \(failure.logCause, privacy: .public)\(detail, privacy: .public) \(BuildInfo.current, privacy: .public)")
-            windowController?.statusNote = failure.userNote
-        }
-    }
-
-    /// IDs añadidos a mano (File → Add project…), persistidos entre arranques.
-    /// Cubren cuentas sin `resourcemanager.projects.list` (403 en discovery).
-    private var knownProjectIDs: [String] {
-        get { UserDefaults.standard.stringArray(forKey: "knownProjectIDs") ?? [] }
-        set { UserDefaults.standard.set(newValue, forKey: "knownProjectIDs") }
-    }
-
-    /// Diálogo Add project (paridad con el picker del IAP original).
-    @objc private func addProjectDialog(_ sender: Any?) {
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.placeholderString = "project-id (p. ej. mi-proyecto-123)"
-        let alert = NSAlert()
-        alert.messageText = "Add project"
-        alert.informativeText = "ID del proyecto de Google Cloud (sin permiso de listado se carga directo)."
-        alert.accessoryView = field
-        alert.addButton(withTitle: "Add")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let id = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard Self.isValidProjectID(id) else {
-            windowController?.statusNote = "ID de proyecto inválido (minúsculas, dígitos, guiones)."
-            return
-        }
-        if !knownProjectIDs.contains(id) {
-            knownProjectIDs = knownProjectIDs + [id]
-        }
-        Task { @MainActor [weak self] in await self?.loadLiveData(trigger: "add-project") }
-    }
+    private var front: ProfileSession? { coordinator?.frontSession }
 
     nonisolated static func isValidProjectID(_ id: String) -> Bool {
         guard (6...30).contains(id.count) else { return false }
@@ -274,24 +67,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             typeName: String(describing: type(of: error)))
     }
 
+    /// `project/zone/instance` → `instance`.
+    nonisolated static func tabTitle(_ identifier: String) -> String {
+        identifier.split(separator: "/").last.map(String.init) ?? identifier
+    }
+
     /// Solo tooling (`tools/snapshot.sh`): con `IAP_SNAPSHOT=<png>` renderiza la
-    /// ventana (incluida la toolbar) a PNG y sale. No necesita permiso de
-    /// grabación de pantalla. `IAP_SNAPSHOT_SELECT=<node id>` preselecciona un nodo y
-    /// `IAP_SNAPSHOT_APPEARANCE=light|dark` fija la apariencia.
+    /// ventana (incluida la toolbar) a PNG y sale. `IAP_SNAPSHOT_SELECT=<node id>`
+    /// preselecciona un nodo y `IAP_SNAPSHOT_APPEARANCE=light|dark` fija la apariencia.
     private func snapshotIfRequested() {
         let env = ProcessInfo.processInfo.environment
-        guard let path = env["IAP_SNAPSHOT"] else { return }
-        // Solo en snapshot se fuerza apariencia; en uso normal manda el sistema.
+        guard let path = env["IAP_SNAPSHOT"], let session = front else { return }
         switch env["IAP_SNAPSHOT_APPEARANCE"] {
         case "light": NSApplication.shared.appearance = NSAppearance(named: .aqua)
         case "dark": NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
         default: break
         }
-        if let id = env["IAP_SNAPSHOT_SELECT"] { windowController?.selectNode(id: id) }
+        if let id = env["IAP_SNAPSHOT_SELECT"] { session.windowController?.selectNode(id: id) }
         // IAP_SNAPSHOT_LOGIN=1 captura la ventana Sign In en vez de la principal.
         let target: NSWindow? = env["IAP_SNAPSHOT_LOGIN"] == "1"
-            ? { showLoginWindow(nil); return loginWindowController?.window }()
-            : windowController?.window
+            ? { session.showLoginWindow(nil); return session.loginWindow }()
+            : session.window
         Task { @MainActor in
             try? await Task.sleep(for: .seconds(1))
             if let frame = target?.contentView?.superview,
@@ -304,13 +100,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// ⌘Q (GH-64): con pestañas abiertas, pasa por el cierre de la ventana
-    /// (confirmación agregada + limpieza); al cerrarse, la app termina sola.
+    /// ⌘Q (GH-64): cada ventana con pestañas pasa por su propio cierre
+    /// (confirmación + limpieza de SU perfil); al cerrarse la última, la app termina.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let window = windowController?.window, window.isVisible,
-              !(windowController?.sessionTabs.sessionIdentifiers.isEmpty ?? true)
-        else { return .terminateNow }
-        window.performClose(nil)
+        let sessions = coordinator?.openSessions ?? []
+        guard sessions.contains(where: { $0.hasOpenTabs && $0.window?.isVisible == true }) else { return .terminateNow }
+        for session in sessions { session.window?.performClose(nil) }
         return .terminateCancel
     }
 
@@ -323,7 +118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RdpFallbackConnector.removeGeneratedFiles()
     }
 
-    // MARK: - Menú principal (File/Session/View/Tools/Window/Help como el original)
+    // MARK: - Menú principal (File/Session/View/Tools/Profiles/Window/Help)
 
     private func installMenu() {
         let app = NSApplication.shared
@@ -333,8 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenu(appName, [
             item("About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
-            signInItem(),
-            signOutItem(),
+            forwarding("Sign In…", #selector(showLoginWindow(_:))),
+            forwarding("Sign Out", #selector(signOut(_:))),
             item("Settings…", #selector(ExplorerWindowController.openSettings(_:)), key: ","),
             .separator(),
             item("Hide \(appName)", #selector(NSApplication.hide(_:)), key: "h"),
@@ -347,10 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenu("File", [
             item("Add project…", #selector(ExplorerWindowController.addProject(_:)), key: "n"),
             .separator(),
-            closeItem(),
+            forwarding("Close Window", #selector(closeActiveSessionOrWindow(_:)), key: "w"),
         ]))
 
-        // Edit: necesario para copiar/pegar en el filtro.
         mainMenu.addItem(submenu("Edit", [
             item("Undo", Selector(("undo:")), key: "z"),
             item("Redo", Selector(("redo:")), key: "z", modifiers: [.command, .shift]),
@@ -361,21 +155,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item("Select All", #selector(NSText.selectAll(_:)), key: "a"),
         ]))
 
-        // Session: conexión llega en M1 (SSH) / M2 (RDP); sin acción → deshabilitado.
         mainMenu.addItem(submenu("Session", [
-            connectItem(),
-            browseFilesItem(),
-            serialOutputItem(),
-            diagnosticsItem(),
-            eventLogItem(),
+            forwarding("Connect", #selector(connectSelected(_:))),
+            forwarding(WindowsConnectInterposer.browseFilesTitle, #selector(browseSelectedFiles(_:))),
+            forwarding("Show serial port output", #selector(showSerialPortOutput(_:))),
+            forwarding(WindowsConnectInterposer.diagnoseTitle, #selector(diagnoseSelected(_:))),
+            forwarding("Show event log", #selector(showEventLog(_:))),
             pending("Connect as user…", milestone: "M2"),
             pending("Connection settings…", milestone: "M2"),
         ]))
 
-        let refreshItem = item("Refresh", #selector(refreshExplorer(_:)), key: "r")
-        refreshItem.target = self
         mainMenu.addItem(submenu("View", [
-            refreshItem,
+            forwarding("Refresh", #selector(refreshExplorer(_:)), key: "r"),
             item("Show/Hide Properties", #selector(ExplorerWindowController.toggleProperties(_:)),
                  key: "p", modifiers: [.command, .option]),
             .separator(),
@@ -386,6 +177,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(submenu("Tools", [
             item("Options…", #selector(ExplorerWindowController.openSettings(_:))),
         ]))
+
+        // GH-72: lista dinámica de perfiles (se reconstruye al abrir el menú).
+        profilesMenu.delegate = self
+        let profilesHolder = NSMenuItem(title: "Profiles", action: nil, keyEquivalent: "")
+        profilesHolder.submenu = profilesMenu
+        mainMenu.addItem(profilesHolder)
 
         let windowMenu = submenu("Window", [
             item("Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m"),
@@ -405,369 +202,119 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         app.mainMenu = mainMenu
     }
 
-    private func signInItem() -> NSMenuItem {
-        let menuItem = item("Sign In…", #selector(showLoginWindow(_:)))
-        menuItem.target = self
-        return menuItem
+    // MARK: - Menú Profiles (T-MT-5)
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === profilesMenu, let coordinator else { return }
+        menu.removeAllItems()
+        for item in Self.profileItems(coordinator.profiles, open: Set(coordinator.openSessions.map(\.id)),
+                                       front: front?.id, target: self, action: #selector(selectProfile(_:))) {
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let add = NSMenuItem(title: "Add profile…", action: #selector(addProfile(_:)), keyEquivalent: "")
+        add.target = self
+        menu.addItem(add)
+        let remove = NSMenuItem(title: "Remove profile", action: nil, keyEquivalent: "")
+        let removeMenu = NSMenu(title: "Remove profile")
+        for profile in coordinator.profiles {
+            let entry = NSMenuItem(title: profile.displayName + "…", action: #selector(removeProfile(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = profile.id.rawValue
+            removeMenu.addItem(entry)
+        }
+        remove.submenu = removeMenu
+        menu.addItem(remove)
     }
 
-    /// REQ-AUTH-3 en producto: cierra sesión revocando en el servidor
-    /// (best-effort dentro de la fachada). Re-review R2 #5.
-    /// Session > Connect: Windows → RDP; el resto, al Explorer (SSH).
-    private func connectItem() -> NSMenuItem {
-        let menuItem = item("Connect", #selector(connectSelected(_:)))
-        menuItem.target = self
-        return menuItem
+    /// Un ítem por perfil: nombre + cuenta redactada (o "sin sesión"), ✓ si
+    /// está abierto. `representedObject` = `profileID`.
+    static func profileItems(
+        _ profiles: [ProfileDescriptor], open: Set<ProfileID>, front: ProfileID?, target: AnyObject?, action: Selector
+    ) -> [NSMenuItem] {
+        profiles.map { profile in
+            let account = profile.redactedAccount ?? "sin sesión"
+            let item = NSMenuItem(title: "\(profile.displayName) — \(account)", action: action, keyEquivalent: "")
+            item.target = target
+            item.representedObject = profile.id.rawValue
+            item.state = profile.id == front ? .on : (open.contains(profile.id) ? .mixed : .off)
+            return item
+        }
     }
 
-    private func diagnosticsItem() -> NSMenuItem {
-        let menuItem = item(WindowsConnectInterposer.diagnoseTitle, #selector(diagnoseSelected(_:)))
-        menuItem.target = self
-        return menuItem
+    @objc private func selectProfile(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = ProfileID(rawValue: raw) else { return }
+        coordinator.activate(id)
     }
 
-    @objc private func diagnoseSelected(_ sender: Any?) {
-        guard let instance = viewModel.selection else {
+    @objc private func addProfile(_ sender: Any?) {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "Nombre del perfil (p. ej. Cliente A)"
+        let alert = NSAlert()
+        alert.messageText = "Add profile"
+        alert.informativeText = "Cada perfil tiene su propia cuenta, client OAuth, proyectos y Keychain."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        coordinator.createProfile(named: field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    @objc private func removeProfile(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = ProfileID(rawValue: raw),
+              let profile = coordinator.profiles.first(where: { $0.id == id })
+        else { return }
+        if coordinator.isOpen(id) {
             let alert = NSAlert()
-            alert.messageText = WindowsConnectInterposer.diagnoseTitle
-            alert.informativeText = "Selecciona una instancia en Project Explorer."
+            alert.messageText = "Cierra primero la ventana de \(profile.displayName)"
+            alert.informativeText = "Así sus sesiones SSH/RDP/SFTP se cierran con su confirmación habitual."
             alert.addButton(withTitle: "OK")
             alert.runModal()
             return
         }
-        diagnosticsPanels.show(instance)
-    }
-
-    private func serialOutputItem() -> NSMenuItem {
-        let menuItem = item("Show serial port output", #selector(showSerialPortOutput(_:)))
-        menuItem.target = self
-        return menuItem
-    }
-
-    private func eventLogItem() -> NSMenuItem {
-        let menuItem = item("Show event log", #selector(showEventLog(_:)))
-        menuItem.target = self
-        return menuItem
-    }
-
-    @objc private func showEventLog(_ sender: Any?) {
-        guard let instance = viewModel.selection else {
-            let alert = NSAlert()
-            alert.messageText = "Show event log"
-            alert.informativeText = "Selecciona una instancia en Project Explorer."
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            return
-        }
-        let panel = eventLogPanels[instance.id]
-            ?? EventLogWindowController(instance: instance, client: vmClient)
-        eventLogPanels[instance.id] = panel
-        panel.showWindow(sender)
-    }
-
-    @objc private func showSerialPortOutput(_ sender: Any?) {
-        guard let instance = viewModel.selection else {
-            let alert = NSAlert()
-            alert.messageText = "Show serial port output"
-            alert.informativeText = "Selecciona una instancia en Project Explorer."
-            alert.addButton(withTitle: "OK")
-            alert.runModal()
-            return
-        }
-        let panel = serialOutputPanels[instance.id]
-            ?? SerialOutputWindowController(instance: instance, client: vmClient)
-        serialOutputPanels[instance.id] = panel
-        panel.showWindow(sender)
-    }
-
-    private func browseFilesItem() -> NSMenuItem {
-        let menuItem = item(WindowsConnectInterposer.browseFilesTitle, #selector(browseSelectedFiles(_:)))
-        menuItem.target = self
-        return menuItem
-    }
-
-    @objc private func connectSelected(_ sender: Any?) {
-        if let instance = viewModel.selection, instance.os == .windows {
-            rdpFlow.connect(instance)
-        } else {
-            windowController?.connectSelectedInstance(sender)
+        let confirm = NSAlert()
+        confirm.alertStyle = .critical
+        confirm.messageText = "¿Eliminar el perfil \(profile.displayName)?"
+        confirm.informativeText = "Se borran su sesión, su client OAuth propio, sus proyectos y sus credenciales "
+            + "guardadas. No se puede deshacer."
+        confirm.addButton(withTitle: "Remove")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try coordinator.removeProfile(id)
+        } catch {
+            let failure = NSAlert()
+            failure.messageText = "No se pudo eliminar el perfil"
+            failure.informativeText = "\(error)"
+            failure.runModal()
         }
     }
 
-    /// ⌘W contextual (GH-64): en el Explorer con una pestaña SSH activa cierra
-    /// esa pestaña; en cualquier otro caso cierra la ventana clave, como antes.
-    private func closeItem() -> NSMenuItem {
-        let menuItem = item("Close Window", #selector(closeActiveSessionOrWindow(_:)), key: "w")
-        menuItem.target = self
-        return menuItem
-    }
+    // MARK: - Reenvío al perfil del frente
 
+    @objc private func showLoginWindow(_ sender: Any?) { front?.showLoginWindow(sender) }
+    @objc private func signOut(_ sender: Any?) { front?.signOut(sender) }
+    @objc private func connectSelected(_ sender: Any?) { front?.connectSelected(sender) }
+    @objc private func browseSelectedFiles(_ sender: Any?) { front?.browseSelectedFiles(sender) }
+    @objc private func showSerialPortOutput(_ sender: Any?) { front?.showSerialPortOutput(sender) }
+    @objc private func diagnoseSelected(_ sender: Any?) { front?.diagnoseSelected(sender) }
+    @objc private func showEventLog(_ sender: Any?) { front?.showEventLog(sender) }
+    @objc private func refreshExplorer(_ sender: Any?) { front?.refreshProfileExplorer(sender) }
+
+    /// ⌘W: si la ventana clave es de un perfil, su lógica contextual; si no,
+    /// cerrar la ventana clave como siempre.
     @objc private func closeActiveSessionOrWindow(_ sender: Any?) {
-        let key = NSApp.keyWindow
-        guard let explorer = windowController?.window, key === explorer, let closeCoordinator else {
-            key?.performClose(sender)
-            return
+        if let session = coordinator?.openSessions.first(where: { $0.window === NSApp.keyWindow }) {
+            session.closeActiveSessionOrWindow(sender)
+        } else {
+            NSApp.keyWindow?.performClose(sender)
         }
-        closeCoordinator.closeActiveSessionOrWindow(title: Self.tabTitle) { explorer.performClose(sender) }
     }
 
-    /// `project/zone/instance` → `instance`.
-    nonisolated static func tabTitle(_ identifier: String) -> String {
-        identifier.split(separator: "/").last.map(String.init) ?? identifier
-    }
-
-    private func signOutItem() -> NSMenuItem {
-        let menuItem = item("Sign Out", #selector(signOut(_:)))
+    private func forwarding(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
+        let menuItem = item(title, action, key: key)
         menuItem.target = self
         return menuItem
-    }
-
-    // MARK: - SSH: doble clic / Connect → pestaña con shell
-
-    private func wireSshConnect() {
-        guard let windowController else { return }
-        let tabs = TerminalTabManager(host: windowController.sessionTabs)
-        tabs.onSessionEnded = { [weak self] instanceID in
-            guard let session = self?.sshSessions.removeValue(forKey: instanceID) else { return }
-            // GH-60: si la pestaña Files la comparte, ella la cierra al terminar.
-            if self?.sftpBrowsers?.isUsing(session) == true { return }
-            Task { await session.close() }
-        }
-        terminalTabs = tabs
-        wireSessionClose(tabs: tabs, windowController: windowController)
-        windowController.onConnectRequest = { [weak self] instance in
-            self?.connect(to: instance)
-        }
-    }
-
-    /// Doble clic y menú contextual en VMs Windows → RDP (ExplorerUI solo cablea Linux).
-    private func wireRdpConnect() {
-        windowsConnect = WindowsConnectInterposer(window: windowController?.window) { [weak self] instance in
-            self?.rdpFlow.connect(instance)
-        }
-        if windowsConnect == nil { RdpConnectFlow.log.error("rdp hookup failed: outline not found") }
-        wireSftpBrowse()
-    }
-
-    /// GH-60: "Browse files…" (menú contextual y Session) → pestaña Files.
-    private func wireSftpBrowse() {
-        guard let windowController else { return }
-        let browsers = SftpBrowsers(
-            host: windowController.sessionTabs,
-            terminalSession: { [weak self] in self?.sshSessions[$0.id] },
-            connect: { [weak self] instance in
-                guard let self else { throw SshSessionError.sessionClosed }
-                guard await self.credentialFacade.currentEmail != nil else {
-                    self.showLoginWindow(nil)
-                    throw SshSessionError.sessionClosed
-                }
-                return try await self.sshConnector.connect(
-                    to: SshTarget(project: instance.project, zone: instance.zone, instance: instance.name))
-            },
-            onFailure: { [weak self] error, instance in
-                let failure = error is SftpError
-                    ? ConnectionFailure(message: "No se pudo abrir el explorador SFTP.", helpTopic: nil)
-                    : ConnectionFailure(error)
-                self?.presentConnectionFailure(failure, instance: instance)
-            })
-        browsers.isTerminalSession = { [weak self] session in
-            self?.sshSessions.values.contains { $0 === session } ?? false
-        }
-        sftpBrowsers = browsers
-        windowsConnect?.onBrowseFiles = { [weak browsers] in browsers?.browse($0) }
-        windowsConnect?.onDiagnose = { [weak self] in self?.diagnosticsPanels.show($0) }
-    }
-
-    @objc private func browseSelectedFiles(_ sender: Any?) {
-        guard let instance = viewModel.selection, instance.os == .linux else { return }
-        sftpBrowsers?.browse(instance)
-    }
-
-    /// GH-64: `×` por pestaña, confirmación y cierre agregado de la ventana.
-    private func wireSessionClose(tabs: TerminalTabManager, windowController: ExplorerWindowController) {
-        let host = windowController.sessionTabs
-        let confirmer = SessionCloseConfirmer.live(tabs: tabs) { [weak self] instanceID in
-            self?.sftpBrowsers?.hasActiveTransfer(instanceID: instanceID) ?? false
-        }
-        let coordinator = SessionCloseCoordinator(
-            tabs: tabs, host: host, confirmer: confirmer,
-            ask: SessionCloseCoordinator.alertAsk { [weak windowController] in windowController?.window })
-        closeCoordinator = coordinator
-        host.onCloseRequested = { [weak self, weak host] identifier in
-            guard let self else { return }
-            if coordinator.isSessionTab(identifier) {
-                Task { await coordinator.requestClose(instanceID: identifier, title: Self.tabTitle(identifier)) }
-            } else if self.sftpBrowsers?.isFilesTab(identifier) == true {
-                self.sftpBrowsers?.close(identifier)
-            } else {
-                host?.closeSession(identifier: identifier)
-            }
-        }
-        let closeGuard = WindowCloseGuard { [weak self, weak host] window in
-            coordinator.windowShouldClose(
-                hasOtherTabs: !(host?.sessionIdentifiers.allSatisfy(coordinator.isSessionTab) ?? true),
-                closeOthers: { self?.sftpBrowsers?.closeAll() },
-                reclose: { window.close() })
-        }
-        windowCloseGuard = closeGuard
-        windowController.window?.delegate = closeGuard
-    }
-
-    private func wireVmControl() {
-        windowController?.onVmControlRequest = { [weak self] action, instance in
-            self?.control(instance, action: action)
-        }
-    }
-
-    private func wireInventory() {
-        windowController?.onSoftwarePackagesRequest = { [weak self] scope in
-            guard let self else { return }
-            let panel = inventoryPanels[scope.id]
-                ?? InventoryWindowController(scope: scope, client: vmClient)
-            inventoryPanels[scope.id] = panel
-            panel.showWindow(nil)
-        }
-    }
-
-    private func control(_ instance: InstanceInfo, action: VmControlAction) {
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                switch action {
-                case .start:
-                    try await vmClient.start(
-                        project: instance.project, zone: instance.zone, instance: instance.name)
-                case .stop:
-                    try await vmClient.stop(
-                        project: instance.project, zone: instance.zone, instance: instance.name)
-                case .reset:
-                    try await vmClient.reset(
-                        project: instance.project, zone: instance.zone, instance: instance.name)
-                case .suspend:
-                    try await vmClient.suspend(
-                        project: instance.project, zone: instance.zone, instance: instance.name)
-                case .resume:
-                    try await vmClient.resume(
-                        project: instance.project, zone: instance.zone, instance: instance.name)
-                }
-                await loadLiveData(trigger: "vmops-refresh")
-            } catch {
-                presentVmControlFailure(action: action, instance: instance, error: error)
-            }
-        }
-    }
-
-    private func presentVmControlFailure(
-        action: VmControlAction, instance: InstanceInfo, error: any Error
-    ) {
-        let detail: String
-        switch error {
-        case GCPClientError.apiError(let status, _):
-            detail = "Google Compute respondió con HTTP \(status)."
-        case GCPClientError.invalidResponse:
-            detail = "Google Compute devolvió una operación inválida o agotó el tiempo de espera."
-        default:
-            detail = "No se pudo completar la solicitud a Google Compute."
-        }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "No se pudo ejecutar \(action.title) en \(instance.name)"
-        alert.informativeText = detail
-        alert.addButton(withTitle: "OK")
-        if let window = windowController?.window, window.isVisible {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
-    }
-
-    private func connect(to instance: InstanceInfo) {
-        guard let tabs = terminalTabs, !connecting.contains(instance.id) else { return }
-        // Pestaña viva: solo se selecciona (una por instancia).
-        if let view = tabs.view(for: instance.id), !view.hasEnded,
-           let session = sshSessions[instance.id] {
-            Task { _ = try? await tabs.openShell(instanceID: instance.id, title: instance.name, session: session) }
-            return
-        }
-        connecting.insert(instance.id)
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.connecting.remove(instance.id) }
-            guard await self.credentialFacade.currentEmail != nil else {
-                self.showLoginWindow(nil)
-                return
-            }
-            let target = SshTarget(project: instance.project, zone: instance.zone, instance: instance.name)
-            do {
-                let session = try await self.sshConnector.connect(to: target)
-                self.sshSessions[instance.id] = session
-                do {
-                    _ = try await tabs.openShell(instanceID: instance.id, title: instance.name, session: session)
-                } catch {
-                    self.sshSessions[instance.id] = nil
-                    await session.close()
-                    throw error
-                }
-            } catch {
-                self.presentConnectionFailure(ConnectionFailure(error), instance: instance)
-            }
-        }
-    }
-
-    /// Error visible con enlace de ayuda (paridad `HelpTopics`); sin secretos.
-    private func presentConnectionFailure(_ failure: ConnectionFailure, instance: InstanceInfo) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "No se pudo conectar a \(instance.name)"
-        alert.informativeText = failure.message
-        alert.addButton(withTitle: "OK")
-        if let help = failure.helpTopic {
-            alert.addButton(withTitle: help.title)
-        }
-        let openHelp: @MainActor (NSApplication.ModalResponse) -> Void = { response in
-            if response == .alertSecondButtonReturn, let help = failure.helpTopic {
-                NSWorkspace.shared.open(help.url)
-            }
-        }
-        if let window = windowController?.window, window.isVisible {
-            alert.beginSheetModal(for: window) { response in
-                MainActor.assumeIsolated { openHelp(response) }
-            }
-        } else {
-            openHelp(alert.runModal())
-        }
-    }
-
-    @objc private func signOut(_ sender: Any?) {
-        Task { await rdpFlow.shutdown() }
-        Task {
-            await credentialFacade.revoke(revokingWith: RevokeClient())
-        }
-    }
-
-    @objc private func showLoginWindow(_ sender: Any?) {
-        if loginWindowController == nil {
-            loginWindowController = LoginWindowController(
-                facade: credentialFacade,
-                clientID: ProcessInfo.processInfo.environment["GOOGLE_OAUTH_CLIENT_ID"] ?? "")
-        }
-        loginWindowController?.showWindow(sender)
-        NSApplication.shared.activate()
-    }
-
-    private func wireRefreshAction() {
-        let refreshID = NSToolbarItem.Identifier("iap.refresh")
-        guard let refreshItem = windowController?.window?.toolbar?.items.first(where: {
-            $0.itemIdentifier == refreshID
-        }) else { return }
-        refreshItem.target = self
-        refreshItem.action = #selector(refreshExplorer(_:))
-    }
-
-    @objc private func refreshExplorer(_ sender: Any?) {
-        Task { @MainActor [weak self] in
-            await self?.loadLiveData(trigger: "refresh")
-        }
     }
 
     private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
@@ -833,10 +380,18 @@ enum MockWorkspace {
     }
 }
 
-/// Delegado de la ventana del Explorer solo para `windowShouldClose` (GH-64).
+/// Delegado de la ventana del Explorer: `windowShouldClose` (GH-64) y aviso de
+/// cierre para liberar la `ProfileSession` del perfil (GH-72).
 @MainActor
 final class WindowCloseGuard: NSObject, NSWindowDelegate {
     private let shouldClose: @MainActor (NSWindow) -> Bool
-    init(shouldClose: @escaping @MainActor (NSWindow) -> Bool) { self.shouldClose = shouldClose }
+    private let willClose: @MainActor () -> Void
+
+    init(shouldClose: @escaping @MainActor (NSWindow) -> Bool, willClose: @escaping @MainActor () -> Void = {}) {
+        self.shouldClose = shouldClose
+        self.willClose = willClose
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool { shouldClose(sender) }
+    func windowWillClose(_ notification: Notification) { willClose() }
 }

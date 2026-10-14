@@ -1,3 +1,4 @@
+import AuthKit
 import ExplorerUI
 import Foundation
 import SettingsStore
@@ -7,10 +8,12 @@ final class ApplicationSettingsDataSource: SettingsPanelDataSource {
     private let projects: () -> [ProjectInfo]
     private let hierarchy: SettingsStoreHierarchy
 
-    init(projects: @escaping () -> [ProjectInfo]) {
+    /// GH-72: `environment` fija el namespace del perfil (el legado conserva
+    /// los nombres de siempre).
+    init(environment: ProfileEnvironment, projects: @escaping () -> [ProjectInfo]) {
         self.projects = projects
         hierarchy = SettingsStoreHierarchy { scope, isSensitive in
-            ApplicationSettingsDataSource.store(for: scope, isSensitive: isSensitive)
+            ApplicationSettingsDataSource.store(for: scope, isSensitive: isSensitive, environment: environment)
         }
     }
 
@@ -122,13 +125,14 @@ final class ApplicationSettingsDataSource: SettingsPanelDataSource {
 
     nonisolated private static func store(
         for scope: SettingsScope,
-        isSensitive: Bool
+        isSensitive: Bool,
+        environment: ProfileEnvironment
     ) -> any SettingsStore {
         let component = scope.persistencePath.replacingOccurrences(of: "/", with: ".")
         if isSensitive {
-            return KeychainSettingsStore(service: "com.iapdesktop.mac.settings.secure.\(component)")
+            return KeychainSettingsStore(service: environment.settingsSecureService(component: component))
         }
-        return UserDefaultsSettingsStore(suiteName: "com.iapdesktop.mac.settings.\(component)")
+        return UserDefaultsSettingsStore(suiteName: environment.settingsSuite(component: component))
     }
 
     private struct Descriptor {
