@@ -14,6 +14,10 @@
     <string>IAP Desktop Mac</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <!-- GH-79: icono dibujado por código (tools/generate-app-icon.swift →
+         resources/AppIcon.icns), copiado al bundle por make-app-bundle.sh. -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
     <string>0.1</string>
     <key>CFBundleVersion</key>
