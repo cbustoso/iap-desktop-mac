@@ -27,6 +27,12 @@ public final class TerminalSessionView: NSView {
     private var typedSinceEnter = false
     /// `TerminalTabManager` ya notificó el fin de esta pestaña.
     var endNotified = false
+    /// GH-82: tema, fuente y tamaño aplicados.
+    public private(set) var terminalAppearance: TerminalAppearance
+    /// El usuario cambió tema o tamaño desde el menú contextual o con
+    /// ⌘+ / ⌘− / ⌘0. `TerminalTabManager` lo persiste y lo aplica a todas las
+    /// pestañas; sin él, solo se aplica a esta vista.
+    public var onAppearanceChange: (@MainActor (TerminalAppearance) -> Void)?
 
     private let backend: any TerminalBackend
     private let outbound: AsyncStream<Outbound>.Continuation
@@ -39,16 +45,28 @@ public final class TerminalSessionView: NSView {
         case resize(columns: Int, rows: Int)
     }
 
-    public init(backend: any TerminalBackend, frame: NSRect = NSRect(x: 0, y: 0, width: 640, height: 400)) {
+    public init(
+        backend: any TerminalBackend,
+        appearance: TerminalAppearance = .default,
+        frame: NSRect = NSRect(x: 0, y: 0, width: 640, height: 400)
+    ) {
         self.backend = backend
-        terminalView = TerminalView(frame: NSRect(origin: .zero, size: frame.size))
+        self.terminalAppearance = appearance
+        let padding = TerminalAppearance.padding
+        terminalView = TerminalView(
+            frame: NSRect(origin: .zero, size: frame.size).insetBy(dx: padding, dy: padding),
+            font: appearance.resolvedFont())
         let (queue, continuation) = AsyncStream<Outbound>.makeStream()
         outbound = continuation
         super.init(frame: frame)
 
+        // Relleno alrededor de la rejilla, del color de fondo del tema.
+        wantsLayer = true
         terminalView.autoresizingMask = [.width, .height]
         terminalView.terminalDelegate = self
         addSubview(terminalView)
+        applyAppearance(appearance)
+        terminalView.menu = makeAppearanceMenu()
 
         // Cola única hacia el backend: no captura `self`.
         pump = Task { [backend] in
@@ -91,6 +109,100 @@ public final class TerminalSessionView: NSView {
         await backend.close()
         feeder?.cancel()
         markEnded()
+    }
+
+    /// Aplica tema/fuente sin persistir (lo hace `TerminalTabManager`).
+    /// Cambiar la fuente recalcula las celdas y, vía `sizeChanged`, el pty.
+    public func applyAppearance(_ newAppearance: TerminalAppearance) {
+        terminalAppearance = newAppearance
+        terminalView.apply(newAppearance)
+        layer?.backgroundColor = newAppearance.theme.background.nsColor.cgColor
+        updateMenuState()
+    }
+
+    // MARK: - Selector de tema y tamaño (GH-82)
+
+    /// Pide un aspecto nuevo: lo resuelve el manager (persistir + todas las
+    /// pestañas) o, si no hay, solo esta vista.
+    func requestAppearance(_ newAppearance: TerminalAppearance) {
+        guard newAppearance != terminalAppearance else { return }
+        if let onAppearanceChange {
+            onAppearanceChange(newAppearance)
+        } else {
+            applyAppearance(newAppearance)
+        }
+    }
+
+    func changeFontSize(by delta: Int) {
+        var next = terminalAppearance
+        next.fontSize += delta
+        requestAppearance(next)
+    }
+
+    func resetFontSize() {
+        var next = terminalAppearance
+        next.fontSize = TerminalAppearance.defaultFontSize
+        requestAppearance(next)
+    }
+
+    func selectTheme(_ themeID: TerminalThemeID) {
+        var next = terminalAppearance
+        next.themeID = themeID
+        requestAppearance(next)
+    }
+
+    private func makeAppearanceMenu() -> NSMenu {
+        let menu = NSMenu(title: "Terminal")
+        let themes = NSMenu(title: "Tema")
+        for themeID in TerminalThemeID.allCases {
+            let item = NSMenuItem(title: themeID.displayName, action: #selector(themeMenuItem(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = themeID.rawValue
+            themes.addItem(item)
+        }
+        let themeItem = NSMenuItem(title: "Tema", action: nil, keyEquivalent: "")
+        themeItem.submenu = themes
+        menu.addItem(themeItem)
+        menu.addItem(.separator())
+        for (title, key, tag) in [("Aumentar texto", "+", 1), ("Reducir texto", "-", -1), ("Tamaño por defecto", "0", 0)] {
+            let item = NSMenuItem(title: title, action: #selector(fontSizeMenuItem(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = .command
+            item.target = self
+            item.tag = tag
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    private func updateMenuState() {
+        guard let themes = terminalView.menu?.items.first?.submenu else { return }
+        for item in themes.items {
+            item.state = (item.representedObject as? String) == terminalAppearance.themeID.rawValue ? .on : .off
+        }
+    }
+
+    @objc private func themeMenuItem(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let themeID = TerminalThemeID(rawValue: raw) else { return }
+        selectTheme(themeID)
+    }
+
+    @objc private func fontSizeMenuItem(_ sender: NSMenuItem) {
+        sender.tag == 0 ? resetFontSize() : changeFontSize(by: sender.tag)
+    }
+
+    /// ⌘+ / ⌘= / ⌘− / ⌘0 con el foco en el terminal (como Terminal.app).
+    public override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === terminalView,
+            event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.shift) == .command,
+            let key = event.charactersIgnoringModifiers
+        else { return super.performKeyEquivalent(with: event) }
+        switch key {
+        case "+", "=": changeFontSize(by: 1)
+        case "-": changeFontSize(by: -1)
+        case "0": resetFontSize()
+        default: return super.performKeyEquivalent(with: event)
+        }
+        return true
     }
 
     /// Enter (CR) sin nada tecleado desde el anterior = "línea vacía": la salida
