@@ -14,6 +14,7 @@ import RDPBridge
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var coordinator: ProfileCoordinator!
+    private let updateController = UpdateController()
     private let profilesMenu = NSMenu(title: "Profiles")
 
     nonisolated static let log = Logger(subsystem: "com.iapdesktop.mac", category: "login")
@@ -26,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        updateController.start()
         installMenu()
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
@@ -131,6 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forwarding("Sign In…", #selector(showLoginWindow(_:))),
             forwarding("Sign Out", #selector(signOut(_:))),
             item("Settings…", #selector(ExplorerWindowController.openSettings(_:)), key: ","),
+            .separator(),
+            forwarding("Check for Updates…", #selector(checkForUpdates(_:))),
+            automaticUpdatesMenuItem(),
             .separator(),
             item("Hide \(appName)", #selector(NSApplication.hide(_:)), key: "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), key: "h", modifiers: [.command, .option]),
@@ -300,6 +305,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func diagnoseSelected(_ sender: Any?) { front?.diagnoseSelected(sender) }
     @objc private func showEventLog(_ sender: Any?) { front?.showEventLog(sender) }
     @objc private func refreshExplorer(_ sender: Any?) { front?.refreshProfileExplorer(sender) }
+    @objc private func checkForUpdates(_ sender: Any?) { updateController.checkForUpdates() }
+    @objc private func toggleAutomaticUpdates(_ sender: Any?) {
+        updateController.toggleAutomaticChecks()
+        (sender as? NSMenuItem)?.state = updateController.automaticallyChecks ? .on : .off
+    }
 
     /// ⌘W: si la ventana clave es de un perfil, su lógica contextual; si no,
     /// cerrar la ventana clave como siempre.
@@ -314,6 +324,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func forwarding(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
         let menuItem = item(title, action, key: key)
         menuItem.target = self
+        return menuItem
+    }
+
+    private func automaticUpdatesMenuItem() -> NSMenuItem {
+        let menuItem = forwarding(
+            "Automatically Check for Updates", #selector(toggleAutomaticUpdates(_:)))
+        menuItem.state = updateController.automaticallyChecks ? .on : .off
         return menuItem
     }
 

@@ -397,3 +397,73 @@ antes, si falta alguna variable de entorno) — no hay modo "simulado".
 - **DMG se genera pero Gatekeeper sigue bloqueando**: falta el `xcrun
   stapler staple` (paso 5 del script) o la notarización no llegó a
   `Accepted`; revisa el log con `xcrun notarytool log <submission-id>`.
+
+## 12. Auto-actualización con Sparkle (GH-83)
+
+La app usa Sparkle 2.9.6 y consulta este appcast estable, publicado como asset
+del último GitHub Release:
+
+```text
+https://github.com/cbustoso/iap-desktop-mac/releases/latest/download/appcast.xml
+```
+
+El menú de la aplicación incluye **Check for Updates…** y **Automatically
+Check for Updates**. La segunda opción se guarda en `UserDefaults` bajo
+`updates.automaticallyChecks`; está activada por defecto y se puede desactivar
+sin telemetría ni perfilado del sistema. Un binario ejecutado directamente con
+`swift run App` no tiene clave pública y deja el updater deshabilitado.
+
+### 12.1 Crear y custodiar la clave real (una sola vez, por el dueño)
+
+El dueño debe usar el `generate_keys` incluido por Sparkle; las claves de los
+tests se generan sólo en memoria y **no** sirven para releases:
+
+```bash
+swift package resolve
+SPARKLE_BIN=".build/artifacts/sparkle/Sparkle/bin"
+"$SPARKLE_BIN/generate_keys"                 # genera en Keychain e imprime la pública
+umask 077
+"$SPARKLE_BIN/generate_keys" -x /ruta/en/volumen-cifrado/sparkle-private-key
+```
+
+Guardar la pública impresa como secret de Actions `SPARKLE_PUBLIC_ED_KEY`.
+Copiar el contenido del fichero exportado al secret `SPARKLE_PRIVATE_KEY` y
+eliminar el fichero temporal de cualquier disco no cifrado. La privada no se
+commitea, no se adjunta a un issue/release, no se pega en logs y no se pasa
+como argumento de proceso. Conviene mantener una copia offline cifrada con
+acceso restringido: perderla impide firmar la cadena normal de updates.
+
+`tools/make-app-bundle.sh release` exige `SPARKLE_PUBLIC_ED_KEY` e inyecta
+`SUPublicEDKey` únicamente en el `Info.plist` del `.app` generado. La clave
+privada jamás entra al bundle ni al repositorio.
+
+### 12.2 Proceso de cada release
+
+Tras compilar, firmar y notarizar como en §11, colocar el DMG final en un
+directorio aislado y generar el appcast. El nombre del tag debe coincidir con
+el GitHub Release que alojará los assets:
+
+```bash
+export SPARKLE_PUBLIC_ED_KEY='base64-publica-generada-por-el-dueño'
+tools/make-app-bundle.sh release
+tools/sign-and-notarize.sh
+
+mkdir -p /tmp/iap-sparkle-v0.2.0
+cp dist/IAPDesktopMac.dmg /tmp/iap-sparkle-v0.2.0/
+# En CI, GitHub inyecta el secret directamente como SPARKLE_PRIVATE_KEY.
+# En local, cargar la copia desde almacenamiento cifrado; no activar xtrace.
+export SPARKLE_PRIVATE_KEY="$(cat /ruta/en/volumen-cifrado/sparkle-private-key)"
+tools/generate-appcast.sh /tmp/iap-sparkle-v0.2.0 v0.2.0
+unset SPARKLE_PRIVATE_KEY
+```
+
+Subir `IAPDesktopMac.dmg` y `appcast.xml` como assets del mismo release y
+publicarlo. Antes de publicar, confirmar que cada `<enclosure>` tiene
+`sparkle:edSignature`, que su URL contiene el tag correcto y que
+`SUPublicEDKey` del bundle coincide con el par usado. El script entrega la
+privada a `generate_appcast --ed-key-file -` por stdin y falla si detecta un
+update sin firma.
+
+No regenerar la clave para cada versión. Una rotación accidental deja a las
+instalaciones existentes sin una ruta confiable de actualización; si se pierde
+o compromete, seguir el procedimiento oficial de rotación de claves de Sparkle.

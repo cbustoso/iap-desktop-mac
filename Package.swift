@@ -8,6 +8,7 @@ let package = Package(
         .executable(name: "App", targets: ["App"])
     ],
     dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
         .package(url: "https://github.com/vapor/websocket-kit.git", from: "2.14.0"),
         // T-SSH-1 (CBU-37): stack SSH. 0.x: los minors pueden romper API, se fija
@@ -49,11 +50,17 @@ let package = Package(
         .target(name: "RDPBridge"),
         .target(name: "SettingsStore"),
         .target(name: "ExplorerUI", dependencies: ["GCPClient"]),
-        .executableTarget(name: "App", dependencies: [
-            "AuthKit", "GCPClient", "TunnelKit", "SSHKit",
-            "TerminalUI", "SFTPKit", "RDPBridge", "SettingsStore",
-            "ExplorerUI",
-        ]),
+        .executableTarget(
+            name: "App",
+            dependencies: [
+                "AuthKit", "GCPClient", "TunnelKit", "SSHKit",
+                "TerminalUI", "SFTPKit", "RDPBridge", "SettingsStore",
+                "ExplorerUI",
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"]),
+            ]),
         .testTarget(name: "AuthKitTests", dependencies: ["AuthKit"]),
         // Mocks compartidos por varios targets de test (relay IAP + servidor SSH).
         // Solo lo enlazan tests; nunca el producto.
@@ -97,5 +104,6 @@ let package = Package(
                 "ExplorerUI",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]),
+        .testTarget(name: "AppTests", dependencies: ["App"]),
     ]
 )
