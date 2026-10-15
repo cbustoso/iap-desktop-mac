@@ -15,8 +15,33 @@ public final class TerminalTabManager {
     /// libera aquí la conexión SSH de esa instancia.
     public var onSessionEnded: (@MainActor (String) -> Void)?
 
-    public init(host: any SessionTabHosting) {
+    /// GH-82: aspecto compartido por todas las pestañas, persistido en las
+    /// claves de Settings (`TerminalFontFamily`/`TerminalFontSize`/`TerminalTheme`).
+    public let appearanceStore: TerminalAppearanceStore
+    public private(set) var appearance: TerminalAppearance
+
+    public init(host: any SessionTabHosting, appearanceStore: TerminalAppearanceStore = TerminalAppearanceStore()) {
         self.host = host
+        self.appearanceStore = appearanceStore
+        appearance = appearanceStore.load()
+    }
+
+    /// Persiste `newAppearance` y lo aplica a todas las pestañas abiertas.
+    public func setAppearance(_ newAppearance: TerminalAppearance) {
+        appearanceStore.save(newAppearance)
+        applyToOpenViews(newAppearance)
+    }
+
+    /// Vuelve a leer Settings (p. ej. tras guardar el panel) y lo aplica.
+    public func reloadAppearance() {
+        applyToOpenViews(appearanceStore.load())
+    }
+
+    private func applyToOpenViews(_ newAppearance: TerminalAppearance) {
+        appearance = newAppearance
+        for view in views.values where view.terminalAppearance != newAppearance {
+            view.applyAppearance(newAppearance)
+        }
     }
 
     /// Instancias con pestaña abierta (activa o desconectada).
@@ -40,7 +65,10 @@ public final class TerminalTabManager {
             views[instanceID] = nil
         }
 
-        let view = TerminalSessionView(backend: backend)
+        // Settings pudo cambiar desde el panel: cada pestaña nueva lo relee.
+        appearance = appearanceStore.load()
+        let view = TerminalSessionView(backend: backend, appearance: appearance)
+        view.onAppearanceChange = { [weak self] in self?.setAppearance($0) }
         view.onEnded = { [weak self, weak view] in
             self?.host.setSessionTitle("\(title) — desconectado", identifier: instanceID)
             if let view { self?.notifyEnded(instanceID, view: view) }
