@@ -22,6 +22,9 @@ let package = Package(
     targets: [
         .target(name: "AuthKit"),
         .target(name: "GCPClient"),
+        // GH-90: ARM REST (descubrimiento Azure). Sin dependencias: el token
+        // por tenant llega como closure (AzureCredentialFacade en la App).
+        .target(name: "AzureClient"),
         .target(
             name: "TunnelKit",
             dependencies: [
@@ -84,6 +87,7 @@ let package = Package(
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ]),
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
+        .testTarget(name: "AzureClientTests", dependencies: ["AzureClient"]),
         .testTarget(name: "SettingsStoreTests", dependencies: ["SettingsStore"]),
         .testTarget(name: "RDPBridgeTests", dependencies: ["RDPBridge"]),
         .testTarget(
