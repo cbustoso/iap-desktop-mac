@@ -58,10 +58,14 @@ public struct AzureInventory: Sendable {
 
 public struct AzureDiscovery: Sendable {
     private let client: AzureARMClient
+    private let directory: any AzureAccountDirectory
     private let maxConcurrentSubscriptions: Int
 
-    public init(client: AzureARMClient, maxConcurrentSubscriptions: Int = 4) {
+    /// - Parameter directory: origen de tenants y suscripciones; por defecto
+    ///   ARM (`client`). En la App, `AzCliAccountDirectory` (`az account list` + ARM).
+    public init(client: AzureARMClient, directory: (any AzureAccountDirectory)? = nil, maxConcurrentSubscriptions: Int = 4) {
         self.client = client
+        self.directory = directory ?? client
         self.maxConcurrentSubscriptions = max(1, maxConcurrentSubscriptions)
     }
 
@@ -69,7 +73,7 @@ public struct AzureDiscovery: Sendable {
         var tenantListFailure: (any Error)?
         var tenants: [AzureTenant]
         do {
-            tenants = try await client.tenants(homeTenantID: homeTenantID)
+            tenants = try await directory.tenants(homeTenantID: homeTenantID)
         } catch {
             tenantListFailure = error
             tenants = []
@@ -84,7 +88,7 @@ public struct AzureDiscovery: Sendable {
             for (index, tenant) in tenants.enumerated() {
                 group.addTask {
                     do {
-                        return (index, try await client.subscriptions(tenantID: tenant.tenantID), nil)
+                        return (index, try await directory.subscriptions(tenantID: tenant.tenantID), nil)
                     } catch {
                         return (index, [], error)
                     }

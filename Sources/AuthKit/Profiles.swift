@@ -47,9 +47,12 @@ public struct ProfileDescriptor: Codable, Sendable, Equatable {
     public var provider: CloudProvider
     /// Google: `nil` mientras no haya login completado ("pendiente de iniciar sesión").
     public var issuer: OidcIssuer?
-    /// Azure: tenant de origen de la cuenta (claim `tid`); `nil` sin login.
-    /// No es secreto, pero tampoco se registra en logs.
+    /// Azure: tenant de la sesión `az` con la que se conectó (claim `tid`);
+    /// `nil` sin conectar. No es secreto, pero tampoco se registra en logs.
     public var homeTenantID: String?
+    /// Azure: cuenta de la sesión `az` (claim `oid`, estable). Con el tenant
+    /// identifica la sesión del perfil; nunca se guarda el UPN completo.
+    public var azureObjectID: String?
     /// Cuenta enmascarada (`a…@example.com`) o identidad workforce redactada.
     /// Nunca el email/UPN completo ni el `principal://` crudo.
     public var redactedAccount: String?
@@ -57,19 +60,20 @@ public struct ProfileDescriptor: Codable, Sendable, Equatable {
 
     public init(
         id: ProfileID, displayName: String, provider: CloudProvider = .google, issuer: OidcIssuer? = nil,
-        homeTenantID: String? = nil, redactedAccount: String? = nil, lastUsedAt: Date? = nil
+        homeTenantID: String? = nil, azureObjectID: String? = nil, redactedAccount: String? = nil, lastUsedAt: Date? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.provider = provider
         self.issuer = issuer
         self.homeTenantID = homeTenantID
+        self.azureObjectID = azureObjectID
         self.redactedAccount = redactedAccount
         self.lastUsedAt = lastUsedAt
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, displayName, provider, issuer, homeTenantID, redactedAccount, lastUsedAt
+        case id, displayName, provider, issuer, homeTenantID, azureObjectID, redactedAccount, lastUsedAt
     }
 
     public init(from decoder: any Decoder) throws {
@@ -81,6 +85,7 @@ public struct ProfileDescriptor: Codable, Sendable, Equatable {
         provider = try container.decodeIfPresent(CloudProvider.self, forKey: .provider) ?? .google
         issuer = try container.decodeIfPresent(OidcIssuer.self, forKey: .issuer)
         homeTenantID = try container.decodeIfPresent(String.self, forKey: .homeTenantID)
+        azureObjectID = try container.decodeIfPresent(String.self, forKey: .azureObjectID)
         redactedAccount = try container.decodeIfPresent(String.self, forKey: .redactedAccount)
         lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
     }
@@ -88,7 +93,7 @@ public struct ProfileDescriptor: Codable, Sendable, Equatable {
     public var isSignedIn: Bool {
         switch provider {
         case .google: issuer != nil
-        case .azure: homeTenantID != nil
+        case .azure: homeTenantID != nil && azureObjectID != nil
         }
     }
 
@@ -260,10 +265,6 @@ public struct ProfileEnvironment: Sendable, Equatable {
 
     public func keychainStore() -> KeychainStore { KeychainStore(service: authKeychainService) }
 
-    /// GH-88/89: credenciales Entra del perfil (`com.iap-mac.azure.profile.<id>`).
-    /// Siempre namespaced: no hay estado Azure legado que conservar.
-    public var azureKeychainService: String { ProfileStore.keychainService(for: id, suffix: "azure") }
-
     /// Suite del override de client OAuth (`nil` = `.standard`, legado).
     public var clientIDSuite: String? {
         usesLegacyLocations ? nil : ProfileStore.userDefaultsSuite(for: id, component: "oauth")
@@ -305,7 +306,7 @@ public struct ProfileEnvironment: Sendable, Equatable {
 
     func purge(keychain: KeychainNamespaceAccess) throws {
         guard !usesLegacyLocations else { return }
-        try Self.purgeKeychain(of: id, knownServices: [authKeychainService, azureKeychainService], keychain: keychain)
+        try Self.purgeKeychain(of: id, knownServices: [authKeychainService], keychain: keychain)
         for suite in [clientIDSuite, explorerSuite].compactMap({ $0 }) {
             UserDefaults.standard.removePersistentDomain(forName: suite)
         }
@@ -325,7 +326,7 @@ public struct ProfileEnvironment: Sendable, Equatable {
     /// NO es una foto consistente: con escrituras concurrentes (otros hilos o
     /// procesos) puede omitir entradas que existen y que una consulta directa
     /// sí encuentra. Una sola lectura vacía no prueba nada, así que:
-    /// 1. los servicios conocidos (auth, azure) se borran directamente, sin enumerar;
+    /// 1. los servicios conocidos (auth) se borran directamente, sin enumerar;
     /// 2. el resto (settings sensibles, componentes no conocidos de antemano)
     ///    se enumera y borra en pases hasta `purgeConfirmations` lecturas
     ///    limpias seguidas; si no se confirma, se lanza error en vez de dar por

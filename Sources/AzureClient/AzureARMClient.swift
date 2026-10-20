@@ -1,6 +1,6 @@
 // GH-90 (specs/azure/azure-bastion-research.md §2, §9.2): cliente REST de Azure
-// Resource Manager. Sin dependencia de AuthKit: el token por tenant llega como
-// closure (en la App, `AzureCredentialFacade.accessToken(tenantID:)`).
+// Resource Manager. El token por tenant llega como closure (en la App,
+// `AzureCredentialFacade.accessToken(tenantID:)`, es decir, el de `az`).
 import Foundation
 import OSLog
 

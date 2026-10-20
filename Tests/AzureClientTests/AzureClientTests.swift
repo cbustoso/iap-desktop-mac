@@ -1,6 +1,8 @@
 // GH-90: AzureARMClient (paginación, api-version, throttling, errores) y
-// AzureDiscovery (árbol con fallos por nodo y emparejamiento VM ↔ Bastion).
+// AzureDiscovery (árbol con fallos por nodo y emparejamiento VM ↔ Bastion),
+// y AzCliAccountDirectory (`az account list` + ARM con el token de `az`).
 // Todo con un URLProtocol stub: ninguna llamada sale a management.azure.com.
+import AuthKit
 import Foundation
 import Testing
 @testable import AzureClient
@@ -435,5 +437,83 @@ struct AzureDiscoveryTests {
         #expect(inventory.tenants.first?.subscriptions.count == 10)
         #expect(gauge.maximum <= 4)
         #expect(gauge.maximum >= 1)
+    }
+}
+
+/// `az account list` tal como lo devuelve el CLI (sesión de Ada, con una
+/// suscripción delegada y una entrada "tenant level" sin suscripciones).
+private let azAccountList = #"""
+[{"cloudName":"AzureCloud","homeTenantId":"\#(home)","id":"\#(subA)","isDefault":true,"name":"Prod","state":"Enabled",
+  "tenantId":"\#(home)","user":{"name":"ada@contoso.com","type":"user"}},
+ {"cloudName":"AzureCloud","homeTenantId":"\#(guest)","id":"\#(subB)","isDefault":false,"name":"Partner","state":"Enabled",
+  "tenantId":"\#(home)","user":{"name":"ada@contoso.com","type":"user"}},
+ {"cloudName":"AzureCloud","id":"\#(guest)","isDefault":false,"name":"N/A(tenant level account)","state":"Enabled",
+  "tenantId":"\#(guest)","user":{"name":"ada@contoso.com","type":"user"}}]
+"""#
+
+private func azAccounts(calls: Log<Int>? = nil) -> @Sendable () async throws -> [AzCliAccount] {
+    {
+        calls?.add(1)
+        return try JSONDecoder().decode([AzCliAccount].self, from: Data(azAccountList.utf8))
+    }
+}
+
+@Suite("AzCliAccountDirectory (GH-90, auth solo az)")
+struct AzCliAccountDirectoryTests {
+    @Test func tenantsComeFromAzAndAreNamedByARM() async throws {
+        let third = "eeeeeeee-0000-0000-0000-000000000005"
+        let session = ARMStub.session { request in
+            ok(page([#"{"tenantId":"\#(guest)","displayName":"Fabrikam","defaultDomain":"fabrikam.com"}"#,
+                     #"{"tenantId":"\#(third)","displayName":"Sin suscripciones"}"#]))
+        }
+        let directory = AzCliAccountDirectory(arm: client(session), accounts: azAccounts())
+        let tenants = try await directory.tenants(homeTenantID: home)
+        #expect(tenants.map(\.tenantID) == [home, guest, third])
+        #expect(tenants[1].displayName == "Fabrikam")
+
+        let offline = AzCliAccountDirectory(arm: client(ARMStub.session { _ in (503, [:], "{}") }), accounts: azAccounts())
+        #expect(try await offline.tenants(homeTenantID: home).map(\.tenantID) == [home, guest])
+    }
+
+    @Test func subscriptionsPreferLiveARMAndFallBackToTheAzCache() async throws {
+        let live = ARMStub.session { request in
+            ok(page([#"{"subscriptionId":"\#(subA)","tenantId":"\#(home)","displayName":"Prod (renamed)","state":"Warned"}"#]))
+        }
+        let directory = AzCliAccountDirectory(arm: client(live), accounts: azAccounts())
+        #expect(try await directory.subscriptions(tenantID: home).map(\.displayName) == ["Prod (renamed)"])
+
+        let down = AzCliAccountDirectory(arm: client(ARMStub.session { _ in (500, [:], "{}") }), accounts: azAccounts())
+        let cached = try await down.subscriptions(tenantID: home)
+        #expect(cached == [
+            AzureSubscription(subscriptionID: subA, tenantID: home, displayName: "Prod", state: "Enabled"),
+            AzureSubscription(subscriptionID: subB, tenantID: guest, displayName: "Partner", state: "Enabled"),
+        ])
+        // Tenant solo "tenant level" en az y ARM caído: el error de ARM, no una lista vacía engañosa.
+        await #expect(throws: AzureARMError.http(status: 500, code: nil, message: nil)) {
+            try await down.subscriptions(tenantID: guest)
+        }
+    }
+
+    @Test func discoveryRunsAzAccountListOnceAndUsesTheAzTokenForARM() async throws {
+        let calls = Log<Int>()
+        let seen = Log<Request>()
+        let session = ARMStub.session { request in
+            seen.add(request)
+            switch request.path {
+            case "/tenants": return (500, [:], "{}")
+            case "/subscriptions": return (500, [:], "{}")  // fuerza la caché de az
+            default: return ok(page([]))
+            }
+        }
+        let arm = AzureARMClient(session: session, sleep: { _ in }, token: { "az-token-\($0)" })
+        let inventory = await AzureDiscovery(client: arm, directory: AzCliAccountDirectory(arm: arm, accounts: azAccounts(calls: calls)))
+            .discover(homeTenantID: home)
+        #expect(calls.all.count == 1)
+        #expect(inventory.tenants.map(\.tenant.tenantID) == [home, guest])
+        let contoso = try #require(inventory.tenants.first)
+        #expect(contoso.subscriptions.map(\.subscription.displayName) == ["Partner", "Prod"])
+        #expect(contoso.subscriptions.allSatisfy { $0.failure == nil && $0.accessTenantID == home })
+        #expect(seen.all.filter { $0.path.hasPrefix("/subscriptions/") }.allSatisfy { $0.authorization == "Bearer az-token-\(home)" })
+        #expect(inventory.tenants.last?.failure != nil)  // guest: solo "tenant level" y ARM caído
     }
 }

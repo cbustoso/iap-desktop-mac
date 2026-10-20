@@ -1,6 +1,7 @@
 // GH-88: `CloudProvider` en `ProfileDescriptor`. Retrocompatibilidad del
 // índice (v1 sin `provider` → Google), upgrade idempotente del esquema,
-// índice ilegible sin pérdida, y namespace Keychain `.azure` por perfil.
+// índice ilegible sin pérdida, y perfil Azure ligado a la sesión `az`
+// (tenant + cuenta), sin credenciales Azure en Keychain.
 import Foundation
 import Security
 import Testing
@@ -87,15 +88,19 @@ struct CloudProviderTests {
         #expect(store.list().map(\.displayName) == ["Nuevo"])
     }
 
-    @Test func azureDescriptorRoundTripsAndSignsInByTenant() throws {
+    @Test func azureProfileIsBoundToTheAzSessionAccountAndTenant() throws {
         let test = IsolatedDefaults()
         defer { test.tearDown() }
         let store = ProfileStore(defaults: test.defaults)
         var azure = ProfileDescriptor(id: .generate(), displayName: "Contoso", provider: .azure)
         #expect(!azure.isSignedIn)
         azure.homeTenantID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
-        azure.redactedAccount = ProfileDescriptor.redactedAccount(azureUsername: "ada@contoso.com")
+        #expect(!azure.isSignedIn)  // tenant sin cuenta no identifica la sesión
+        azure.bindAzureAccount(AzureAccountIdentity(
+            tenantID: "72f988bf-86f1-41af-91ab-2d7cd011db47", objectID: "0b5e7f3c-0000-0000-0000-00000000000a", username: "ada@contoso.com"))
         #expect(azure.isSignedIn)
+        #expect(azure.azureObjectID == "0b5e7f3c-0000-0000-0000-00000000000a")
+        #expect(azure.redactedAccount == "a…@contoso.com")
         // Un `issuer` Google no hace "signed in" a un perfil Azure.
         #expect(!ProfileDescriptor(id: .generate(), displayName: "x", provider: .azure, issuer: .gaia).isSignedIn)
         try store.upsert(azure)
@@ -111,26 +116,6 @@ struct CloudProviderTests {
         #expect(ProfileDescriptor.redactedAccount(azureUsername: "ada_corp.com#EXT#@fabrikam.onmicrosoft.com")
             == "a…@fabrikam.onmicrosoft.com")
         #expect(ProfileDescriptor.redactedAccount(azureUsername: "no-at-sign") == "<redacted>")
-    }
-
-    @Test func azureKeychainServiceIsNamespacedPerProfile() {
-        let a = ProfileEnvironment(id: ProfileID(rawValue: "aaaa1111")!, migrationCompleted: true)
-        let b = ProfileEnvironment(id: ProfileID(rawValue: "aaaa11112")!, migrationCompleted: true)
-        #expect(a.azureKeychainService == "com.iap-mac.azure.profile.aaaa1111")
-        #expect(ProfileEnvironment.belongs(a.azureKeychainService, to: a.id))
-        #expect(!ProfileEnvironment.belongs(b.azureKeychainService, to: a.id))
-        // El legado también usa nombre namespaced: no hay Azure "de antes".
-        let legacy = ProfileEnvironment(id: .legacyDefault, migrationCompleted: false)
-        #expect(legacy.azureKeychainService == "com.iap-mac.azure.profile.legacy-default-profile")
-    }
-
-    @Test func purgeDeletesTheAzureServiceDirectlyAndSparesOtherProfiles() throws {
-        let a = ProfileEnvironment(id: ProfileID(rawValue: "aaaa1111")!, migrationCompleted: true)
-        let b = ProfileEnvironment(id: ProfileID(rawValue: "bbbb2222")!, migrationCompleted: true)
-        let keychain = MemoryKeychain([a.authKeychainService, a.azureKeychainService, b.azureKeychainService])
-        try a.purge(keychain: keychain.access)
-        #expect(keychain.deleted.prefix(2) == [a.authKeychainService, a.azureKeychainService])
-        #expect(keychain.remaining == [b.azureKeychainService])
     }
 
     @Test func googleCredentialsSurviveTheIndexUpgrade() throws {
@@ -150,29 +135,5 @@ struct CloudProviderTests {
         // Mismo servicio Keychain de siempre: la credencial se sigue leyendo.
         #expect(env.authKeychainService == "com.iap-mac.auth.profile.\(id.rawValue)")
         #expect(try env.keychainStore().load(issuer: .gaia, email: "ada@example.com") == credential)
-    }
-}
-
-/// Keychain en memoria para `purge` (determinista, sin el Keychain real).
-private final class MemoryKeychain: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: Set<String>
-    private var deletes: [String] = []
-
-    init(_ services: Set<String>) { stored = services }
-
-    var remaining: Set<String> { lock.withLock { stored } }
-    var deleted: [String] { lock.withLock { deletes } }
-
-    var access: KeychainNamespaceAccess {
-        KeychainNamespaceAccess(
-            services: { self.lock.withLock { Array(self.stored) } },
-            delete: { service in
-                self.lock.withLock {
-                    self.deletes.append(service)
-                    self.stored.remove(service)
-                }
-            },
-            pause: {})
     }
 }
