@@ -36,9 +36,16 @@ Convención de este documento:
    frames binarios = bytes TCP crudos**, sin framing propio (a diferencia del relay IAP).
    Es trivial de implementar en Swift con el `NIOWebSocketTransport` que ya tenemos, **pero
    el protocolo no está documentado** (🔍): riesgo de rotura sin aviso.
-5. **Recomendación**: entregar primero auth + árbol Azure (read-only, 100 % documentado) y
-   conexión **delegando en el `az` del usuario** (contractual); luego un túnel nativo Swift
-   detrás de feature flag con fallback automático al CLI.
+5. **Dos caminos de transporte, explícitamente distintos** (§3.7):
+   **(a) túnel nativo Swift** reimplementando el protocolo del CLI (no documentado) vs
+   **(b) delegar en el `az` instalado por el usuario** (documentado/soportado, requiere Azure CLI).
+6. **Limitación crítica de RDP**: el login RDP con **Entra ID vía Bastion no es posible desde
+   macOS** — Microsoft solo lo permite con `az network bastion rdp` (Windows-only) y desde PCs
+   Windows 10+ unidos/registrados en el mismo directorio (§3.6). Desde Mac: credenciales
+   locales/dominio en la VM, o un jump host Windows unido a Entra.
+7. **Recomendación**: entregar primero auth + árbol Azure (read-only, 100 % documentado) y
+   conexión vía **(b) `az`**; luego **(a)** detrás de feature flag con fallback automático a (b).
+   Hay precedente comercial casi idéntico en macOS (TYO Reach, §8): el problema está validado.
 
 Veredicto global: **GO por fases** (detalle en §6.4).
 
@@ -170,7 +177,9 @@ verificado en este spike; F1 lo cubre o deja que el usuario elija el Bastion a m
 
 ✅ [connect-vm-native-client-linux § Required roles](https://learn.microsoft.com/en-us/azure/bastion/connect-vm-native-client-linux):
 
-- **Reader** sobre la VM, **Reader** sobre la NIC con la IP privada, **Reader** sobre el recurso Bastion.
+- **Reader** sobre la VM, **Reader** sobre la NIC con la IP privada, **Reader** sobre el recurso Bastion,
+  y **Reader** sobre la VNet de la VM si el Bastion está en una VNet peered
+  (✅ [bastion-entra-id-authentication § Assign roles](https://learn.microsoft.com/en-us/azure/bastion/bastion-entra-id-authentication)).
 - Solo si se usa login Entra en la VM: **Virtual Machine User Login** o **Virtual Machine Administrator Login**.
 - Para descubrimiento basta Reader en sub/RG. Para `run-command` (§4) hace falta
   `Microsoft.Compute/virtualMachines/runCommand/action` (Virtual Machine Contributor o rol custom).
@@ -205,8 +214,34 @@ el motivo ("SKU sin native client: actualizar a Standard") — mismo comportamie
 - Bastion → VM: 22 / 3389 (o custom port en Standard+).
 - Internos del plano de datos de Bastion: **8080 y 5701** VirtualNetwork↔VirtualNetwork;
   443 a GatewayManager/AzureLoadBalancer/AzureCloud; 80 saliente a Internet.
-- **8081 no aparece en la documentación de Bastion.** Probablemente se confundió con 8080
-  (interno). No afecta al cliente.
+- **8081 no aparece en la documentación de Bastion** (revisadas NSG, native client, config
+  settings) **ni en el código del CLI** (`tunnel.py` solo usa `https://`/`wss://` al puerto por
+  defecto 443). El brief del orquestador menciona "443/8081"; lo tratamos como confusión con
+  8080 (interno). No afecta al cliente: **solo 443 saliente**.
+
+### 3.2b Matriz oficial de native client (qué comando sirve desde macOS)
+
+✅ [native-client § Connecting to VMs](https://learn.microsoft.com/en-us/azure/bastion/native-client)
++ ✅ [connect-vm-native-client-linux](https://learn.microsoft.com/en-us/azure/bastion/connect-vm-native-client-linux)
++ 🔍 `custom.py` (`_get_ssh_path`: *"Supported platforms: Windows, Darwin, Linux"*;
+`_get_rdp_path`: *"Supported platforms: Windows"*):
+
+| Comando | macOS | Entra ID | Sesiones concurrentes | Custom port | Notas |
+|---|---|---|---|---|---|
+| `az network bastion tunnel` | ✅ | **No** (solo reenvía TCP) | **No** | **No** (según la matriz) | Cualquier cliente nativo (ssh, scp, Windows App) a `127.0.0.1:<port>` |
+| `az network bastion ssh --auth-type password\|ssh-key\|AAD` | ✅ (cross-platform) | **Sí** (`AAD`, Linux VM con `AADSSHLoginForLinux`) | Sí | Sí | Lanza el `ssh` del sistema; sin file transfer |
+| `az network bastion rdp` | ❌ Windows-only (usa `mstsc`) | Sí (`--enable-mfa`) | Sí | Sí | Inútil en Mac |
+
+Sintaxis exacta del túnel (✅):
+
+```bash
+az network bastion tunnel --name "<BastionName>" --resource-group "<ResourceGroupName>" \
+  --target-resource-id "<VMResourceId>" --resource-port "<22|3389>" --port "<LocalMachinePort>"
+```
+
+IP‑connect (`--target-ip-address` en lugar de `--target-resource-id`): requiere **Standard+**
+y activar *IP-based connection*; sin Entra para RDP, sin custom ports
+✅ [connect-ip-address](https://learn.microsoft.com/en-us/azure/bastion/connect-ip-address).
 
 ### 3.3 Cómo funciona por dentro `az network bastion tunnel` 🔍
 
@@ -296,6 +331,58 @@ Diseño del fallback (`AzCliBastionTunnel`):
    - RDP: `.rdp` → Windows App.
 4. Al cerrar la pestaña: `SIGINT` al proceso (el CLI hace `cleanup()` = `DELETE /api/tokens`).
 5. Sandbox: la app no está sandboxed hoy (bundle sin firmar, `tools/make-app-bundle.sh`) → `Process` OK.
+6. Variante para **SSH con Entra** (única vía documentada desde Mac): `az network bastion ssh
+   --auth-type AAD` lanza el `ssh` del sistema, así que no se puede montar sobre nuestro
+   `SshSession`; requiere una pestaña de terminal **de proceso local** (SwiftTerm
+   `LocalProcessTerminalView`) que ejecute el comando. Sin SFTP integrado en ese modo.
+
+### 3.6 Limitación crítica: RDP con Entra ID desde macOS
+
+✅ [bastion-entra-id-authentication § Limitations](https://learn.microsoft.com/en-us/azure/bastion/bastion-entra-id-authentication):
+
+- *"For native client RDP connections, remote connection to virtual machines joined to Microsoft
+  Entra ID is allowed only from Windows 10 or later PCs that are Microsoft Entra registered,
+  Microsoft Entra joined, or Microsoft Entra hybrid joined to the same directory as the virtual machine."*
+- El único comando native client con Entra para RDP es `az network bastion rdp --enable-mfa`,
+  que es Windows-only (§3.2b).
+- RDP con Entra **en el portal** (navegador) existe pero está en *public preview* y no es native client.
+- El brief del orquestador cita además un Q&A oficial (2026‑03) según el cual el cliente macOS
+  no completa NLA/CredSSP con Entra. **No pudimos localizar ese hilo**; el hilo de Q&A de
+  2026‑03 encontrado ([answers/a/12645110](https://learn.microsoft.com/answers/a/12645110)) trata
+  de la opción Entra oculta en el portal, no de macOS. La conclusión se sostiene igualmente con
+  la doc oficial citada arriba.
+
+**Consecuencias de diseño**:
+
+1. RDP desde la app = túnel (a o b) + Windows App con **credenciales locales o de dominio AD**
+   de la VM (igual que hoy en GCP con `RDPBridge` + reset de credenciales).
+2. Para VMs **solo Entra-joined** sin cuenta local: ofrecer "reset de contraseña local" vía
+   extensión VMAccess / `runCommand` (F4) o documentar el jump host Windows unido a Entra.
+3. El árbol debe avisar: "Entra RDP no disponible desde macOS" cuando la VM tenga la extensión
+   `AADLoginForWindows` (visible en `instanceView.extensions`).
+4. SSH con Entra **sí** es posible desde Mac, pero solo vía `az network bastion ssh --auth-type AAD` (§3.5 punto 6).
+
+### 3.7 Dos caminos de transporte: (a) nativo Swift vs (b) `az` delegado
+
+| | **(a) Túnel nativo Swift** | **(b) Delegar en `az` del usuario** |
+|---|---|---|
+| Base | Reimplementar 🔍 `POST /api/tokens` + `wss://{dnsName}/webtunnelv2/…` (443) | ✅ `az network bastion tunnel` / `ssh` documentados |
+| Contrato | **Ninguno**: puede romperse sin aviso | Soportado por Microsoft |
+| Requisitos usuario | Ninguno extra | Azure CLI ≥ 2.32 (+ extensión `bastion`, auto) y `az login` **aparte** |
+| Identidad | La del perfil de la app (multi-cuenta real, Keychain aislado) | La sesión global de `az` (una "cuenta activa"; choca con multi-perfil, mitigable con `--subscription` y `AZURE_CONFIG_DIR` por perfil ⚠️) |
+| SSH | In-process sobre `SshSession` (terminal + SFTP integrados, sin puerto local) | Por puerto local `127.0.0.1` → `SshSession` igualmente (o `ssh` del sistema para Entra) |
+| RDP | `IapListener` + Windows App | Puerto del `az` + Windows App |
+| Entra SSH | No (requeriría el flujo de certificados `az ssh cert`, no documentado) | **Sí** (`--auth-type AAD`) |
+| Entra RDP desde Mac | No (limitación de plataforma, §3.6) | No (igual) |
+| Superficie / mantenimiento | ~600–900 LOC + mock server + test de contrato | ~300 LOC (detección, proceso, puertos, errores) |
+| UX | Óptima (sin dependencias) | Aceptable (instalar CLI, login doble) |
+
+**Veredictos** (ver plan §6.4):
+
+- **(b) `az` delegado — GO** como primer camino de conexión (F2) y como **fallback permanente**.
+- **(a) nativo Swift — GO condicional**: solo si el spike F0 confirma que Bastion acepta tokens
+  de nuestra app registration; siempre detrás de flag y con fallback automático a (b) ante
+  `protocolChanged`. NO-GO como único camino.
 
 ---
 
@@ -307,6 +394,12 @@ Diseño del fallback (`AzCliBastionTunnel`):
 | **VPN punto a sitio** | VPN Gateway + Azure VPN Client (macOS) | Acceso de red completo, cualquier cliente | Infra aparte, coste fijo (VpnGw1 **$0.19/h** + $0.01/conexión‑h en eastus, Retail Prices API), fuera del alcance de la app | Fuera de alcance: la app funcionaría "directo a IP privada" sin cambios de túnel |
 | **`az vm run-command` / REST** ✅ [virtual-machines/run-command](https://learn.microsoft.com/en-us/rest/api/compute/virtual-machines/run-command) | `POST …/virtualMachines/{vm}/runCommand?api-version=2026-04-01` `{commandId: "RunShellScript"\|"RunPowerShellScript", script:[…]}` → 202 + `Location`/`Retry-After` | Sin red hacia la VM; útil para diagnóstico y para **inyectar una llave SSH efímera** (equivalente a "metadata keys" de GCP) | No interactivo, lento (decenas de s), requiere `runCommand/action` | **GO como complemento** (fase 4: "reset credenciales"/llave efímera), no como transporte |
 | **Jump host propio** | VM con IP pública + `ProxyJump` | Barato, estándar | Superficie expuesta, gestión de llaves; es justo lo que Bastion evita | Soportable "gratis" si la app admite SSH a IP/host arbitrario (fuera de GH-84) |
+| **Microsoft Entra Private Access** ✅ [concept-private-access](https://learn.microsoft.com/en-us/entra/global-secure-access/concept-private-access), [cliente macOS](https://learn.microsoft.com/en-us/entra/global-secure-access/how-to-install-macos-client) | ZTNA de Microsoft (Global Secure Access): cliente en el Mac + *private network connector* en la VNet; Quick Access por FQDN/IP con Conditional Access | Sin IP pública ni Bastion; CA/MFA por app; cliente macOS (macOS 14+) | Licencia Entra Suite/Private Access; el Mac debe estar **registrado en el tenant vía Company Portal**; despliegue MDM; es red, no gestión de VMs | Fuera de alcance; si el cliente lo tiene, la app conecta "directo a IP privada" (modo futuro *Direct*) |
+| **Tailscale / NetBird (self-hosted)** — [Tailscale subnet routers](https://tailscale.com/kb/1019/subnets), [NetBird routing](https://docs.netbird.io/how-to/routing-traffic-to-private-networks) | Un nodo *subnet router / routing peer* en la VNet anuncia sus rangos al mesh WireGuard | Muy barato (una VM pequeña), multi-nube, buena UX en Mac | Infra y política propias; NetBird marca *Routes* como deprecado en favor de *Networks*; identidad no ligada a RBAC de Azure | Fuera de alcance; mismo modo *Direct* que VPN/Private Access |
+
+Las cuatro opciones de red (VPN P2S, Private Access, Tailscale/NetBird, jump host) comparten
+una conclusión: **no necesitan código de túnel en la app**; bastaría un modo de conexión
+"Direct (IP privada alcanzable)" — issue aparte, barato, independiente de Bastion.
 
 ---
 
@@ -526,7 +619,7 @@ Bastion transporta bytes; **la autenticación SSH/RDP sigue siendo con la VM**:
 
 - F2/F3: llave SSH local del usuario o usuario/contraseña (Keychain por perfil, reutiliza
   `KeychainSettingsStore`), host key TOFU (`InMemoryKnownHosts` → T-SSH-7).
-- RDP: usuario/contraseña local o Entra (VM unida a Entra) en el `.rdp`.
+- RDP: usuario/contraseña **local o de dominio AD** en el `.rdp`. **No Entra** desde macOS (§3.6).
 - F4 (NO-GO por ahora): login Entra SSH (certificado de `az ssh cert` 🔍, no documentado como
   REST) y llave efímera vía `runCommand` (✅ documentado, pero lento).
 
@@ -585,11 +678,21 @@ los importes por JS).
 |---|---|---|---|---|
 | **F0 — Spike de validación** | Bastion Standard efímero en suscripción de prueba; app registration multi‑tenant propia; script/CLI de prueba (Swift en `Spikes/`) que haga POST `/api/tokens` + WSS y un `ssh -p` por puerto local. Confirmar R2 (audiencia/appid), cierre, expiración de token. | 2–3 d + ~2–4 h de Bastion (≈ $1) | Suscripción Azure del dueño | **GO** |
 | **F1 — Identidad + árbol (read‑only)** | `CloudProvider` en `ProfileDescriptor`; `EntraAuthorizer`/`AzureCredentialFacade` (PKCE, refresh por tenant, Keychain `.azure`); `ArmClient` + `AzureDiscovery`; nodos Azure en `ExplorerNode`; `ProfileSessionHosting`; Properties. 100 % API documentada. | 6–9 d | — (puede ir en paralelo a F0) | **GO** |
-| **F2 — Conexión vía `az` (contractual)** | `AzCliBastionTunnel` (detección, puerto, `Process`, ready, SIGINT); SSH (`SshSession` sobre NWConnection loopback) + SFTP; RDP con `RDPBridge`; credenciales VM en Keychain; mensajes de SKU/RBAC. | 4–5 d | F1 | **GO** |
-| **F3 — Túnel nativo Swift** | `BastionTunnelStream` (NIO WS sin subprotocolo, binario, DELETE al cerrar), `BastionTransportSelector` con fallback a F2, `IapListener` factory para RDP, tests con mock server (patrón `specs/tunnel/mock-server.md`), feature flag *Settings → Azure → Transporte*. | 6–8 d | F0 positivo + F2 | **GO condicional** (solo si F0 confirma R2; detrás de flag, default `automatic`) |
-| **F4 — Extras** | Device code; login Entra SSH (`az ssh cert`); llave efímera vía `runCommand`; IP‑connect; Developer SKU (`/omni/webtunnel`); Arc. | 8–15 d | F3 | **NO-GO** por ahora (no documentado o bajo valor/alto riesgo); reevaluar con demanda real |
+| **F2 — Conexión vía (b) `az` (contractual)** | `AzCliBastionTunnel` (detección, puerto, `Process`, ready, SIGINT); SSH (`SshSession` sobre NWConnection loopback) + SFTP; RDP con `RDPBridge` y credenciales locales/dominio (§3.6); credenciales VM en Keychain; mensajes de SKU/RBAC/Entra‑RDP. | 4–5 d | F1 | **GO** — camino recomendado para la primera versión usable |
+| **F2b — SSH Entra vía (b)** | Pestaña de terminal de proceso local que ejecuta `az network bastion ssh --auth-type AAD`. | 2–3 d | F2 | **GO condicional** (si el dueño tiene VMs Linux con `AADSSHLoginForLinux`) |
+| **F3 — Túnel (a) nativo Swift** | `BastionTunnelStream` (NIO WS sin subprotocolo, binario, DELETE al cerrar), `BastionTransportSelector` con fallback a (b), `IapListener` factory para RDP, tests con mock server (patrón `specs/tunnel/mock-server.md`), feature flag *Settings → Azure → Transporte*. | 6–8 d | F0 positivo + F2 | **GO condicional** (solo si F0 confirma R2; detrás de flag, default `automatic`). **NO-GO como único transporte.** |
+| **F4 — Extras** | Device code; login Entra SSH nativo (`az ssh cert`); reset de contraseña local / llave efímera vía `runCommand`/VMAccess; IP‑connect; Developer SKU (`/omni/webtunnel`); Arc; Entra RDP desde Mac. | 8–15 d | F3 | **NO-GO** por ahora (no documentado, bajo valor o imposible en plataforma — Entra RDP); reevaluar con demanda real |
 
-Total hasta F3: **≈ 18–25 días‑persona**. Valor entregable desde F2 (≈ 12–17 d).
+Total hasta F3: **≈ 18–25 días‑persona** (+2–3 d si F2b). Valor entregable desde F2 (≈ 12–17 d).
+
+Recomendación por fase, en una línea:
+
+- **F0**: hacerlo ya; es barato y decide si (a) vale la pena.
+- **F1**: hacerlo en paralelo a F0; todo documentado, sin riesgo de protocolo.
+- **F2**: entregar con (b) como única vía soportada en la primera versión pública.
+- **F2b**: solo si hay demanda de Entra SSH.
+- **F3**: solo con F0 en verde; (a) como optimización de UX, nunca sin fallback a (b).
+- **F4**: no planificar.
 
 ---
 
@@ -606,7 +709,38 @@ Total hasta F3: **≈ 18–25 días‑persona**. Valor entregable desde F2 (≈ 
 8. **GH-84.8 — BastionKit: `AzCliBastionTunnel` (fallback `az`) + Connect SSH/SFTP/RDP**.
 9. **GH-84.9 — BastionKit: `BastionTunnelStream` nativo + `BastionTransportSelector` + mock server** (bloqueado por GH-84.1).
 10. **GH-84.10 — Docs: `docs/usage.md` §13 "Azure" (app registration, admin consent, SKU Standard + Native Client, RBAC, costes)**.
-11. **GH-84.11 — (Backlog, NO-GO) Entra SSH / llave efímera por `runCommand` / Developer SKU / Arc**.
+11. **GH-84.11 — (Backlog, NO-GO) Entra SSH nativo / llave efímera por `runCommand` / Developer SKU / Arc / Entra RDP desde Mac**.
+12. **GH-84.12 — (GO condicional) SSH Entra vía `az network bastion ssh --auth-type AAD` en pestaña de proceso local** (F2b).
+13. **GH-84.13 — (Independiente) Modo de conexión "Direct" a IP privada** (sirve para VPN P2S, Entra Private Access, Tailscale/NetBird, jump host).
+
+---
+
+## 8. Herramientas existentes y por qué construimos esto
+
+| Herramienta | Plataforma | Qué hace | Túnel Bastion | Multi-cuenta/tenant | Licencia | Lección para nosotros |
+|---|---|---|---|---|---|---|
+| **TYO Reach** — [docs Azure Bastion](https://reach.tyo.com.au/docs/remote-targets-azure-bastion) | Win/**macOS**/Linux (desktop) | Login Entra con **app multi-tenant + admin consent una vez por tenant**, auth code + PKCE en navegador (*"device-code sign-in is blocked under Security Defaults"*), abre puerto local vía Bastion **Standard + native client** y lanza RDP/SSH; *"Reach is never in the traffic path"* | Sí | Sí (multi-tenant) | Comercial (plan Team; licencia no publicada) | **Valida exactamente nuestra arquitectura** (auth, SKU, puerto local). Diferencia: no es open source ni parte de un cliente unificado GCP+Azure |
+| **Azure Bastion (VS Code)** — [taizod1024.azure-bastion](https://marketplace.visualstudio.com/items?itemName=taizod1024.azure-bastion) | **Windows-only** (PowerShell) | Sidebar suscripciones → VMs alcanzables por Bastion con power state; elegir Bastion si hay varios; Tunnel/SSH/RDP vía `az`; escribe bloque gestionado en `~/.ssh/config` (`# azure-bastion:start/end`) | Sí, vía `az` | Vía auth de VS Code | Extensión de marketplace | Referencia de UX del árbol y del **selector de Bastion**; idea de bloque `~/.ssh/config` gestionado para usar `ssh`/`scp` fuera de la app |
+| **AzPin** — [github.com/lfmundim/AzPin](https://github.com/lfmundim/AzPin) | macOS menubar (Swift/SwiftUI) | Lee la sesión de `az`, fija resource groups, abre recursos en el portal, start/stop de App Services/Functions/Container Apps | **No** | La de `az` | MIT | Precedente de app Swift nativa que reusa `az`; no resuelve conectividad |
+| **purple** — [github.com/erickochen/purple](https://github.com/erickochen/purple) | macOS/Linux (TUI, Rust) | Gestor de SSH/`~/.ssh/config` que sincroniza hosts de 18 proveedores (incluye Azure), multi-cuenta, ProxyJump, monitoreo de forwards | No documentado | Sí | MIT | Precedente OSS de "inventario multi-nube → SSH"; no cubre Bastion ni RDP |
+| **Azure CLI** (`az network bastion …`) | Todas | Referencia oficial | Sí | Una sesión activa | MIT | Es nuestro camino (b) y la fuente del protocolo de (a) |
+| **Portal Azure** (Bastion en navegador) | Navegador | RDP/SSH HTML5 | Sí (todas las SKU) | Cambio de directorio manual | — | Funciona en Basic/Developer, pero sin cliente nativo, SFTP ni multi-sesión cómoda |
+
+**Por qué construimos esto** (y no solo recomendamos una herramienta existente):
+
+1. **Paridad con lo que ya existe en la app para GCP**: un único cliente nativo macOS con árbol,
+   terminal integrado, SFTP, RDP vía Windows App y **perfiles multi-cuenta aislados por Keychain**.
+   Ninguna herramienta abierta ofrece eso para Azure Bastion en macOS.
+2. **Open source**: el único equivalente funcional en Mac (TYO Reach) es comercial; la extensión
+   de VS Code es Windows-only; AzPin y purple no tunelean por Bastion.
+3. **Reutilización alta**: SSHKit, SFTPKit, TerminalUI, RDPBridge, el listener loopback y el
+   transporte WebSocket ya existen; el trabajo nuevo es identidad Entra, descubrimiento ARM y
+   un adaptador de transporte.
+4. **Riesgo acotado**: empezando por (b) `az` dependemos solo de APIs documentadas; (a) es una
+   mejora opcional.
+
+Qué **no** aportamos frente a la competencia: Entra RDP desde Mac (imposible por plataforma,
+§3.6) ni funcionamiento con Bastion Basic/Developer (limitación de SKU, §3.1).
 
 ---
 
@@ -638,4 +772,14 @@ Total hasta F3: **≈ 18–25 días‑persona**. Valor entregable desde F2 (≈ 
   [bastion/custom.py](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/custom.py) ·
   [developer_sku_helper.py](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/developer_sku_helper.py) ·
   [azure-cli-core auth/util.py](https://github.com/Azure/azure-cli/blob/dev/src/azure-cli-core/azure/cli/core/auth/util.py)
-- Alternativas: [Arc SSH](https://learn.microsoft.com/en-us/azure/azure-arc/servers/ssh-arc-overview)
+- Bastion (adicionales): [Entra ID authentication](https://learn.microsoft.com/en-us/azure/bastion/bastion-entra-id-authentication) ·
+  [IP-based connection](https://learn.microsoft.com/en-us/azure/bastion/connect-ip-address) ·
+  [Q&A 2026-03 opción Entra en portal](https://learn.microsoft.com/answers/a/12645110)
+- Alternativas: [Arc SSH](https://learn.microsoft.com/en-us/azure/azure-arc/servers/ssh-arc-overview) ·
+  [Entra Private Access](https://learn.microsoft.com/en-us/entra/global-secure-access/concept-private-access) ·
+  [GSA client macOS](https://learn.microsoft.com/en-us/entra/global-secure-access/how-to-install-macos-client) ·
+  [Tailscale subnet routers](https://tailscale.com/kb/1019/subnets) ·
+  [NetBird routing](https://docs.netbird.io/how-to/routing-traffic-to-private-networks)
+- Herramientas existentes: [TYO Reach](https://reach.tyo.com.au/docs/remote-targets-azure-bastion) ·
+  [VS Code azure-bastion](https://marketplace.visualstudio.com/items?itemName=taizod1024.azure-bastion) ·
+  [AzPin](https://github.com/lfmundim/AzPin) · [purple](https://github.com/erickochen/purple)
