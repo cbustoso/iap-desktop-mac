@@ -31,23 +31,28 @@ Convención de este documento:
 3. **Bastion**: el *native client* (lo único usable desde una app de escritorio) exige
    **SKU Standard o Premium con `enableTunneling = true`**. Basic no sirve; Developer solo
    desde el portal (y el CLI tiene un camino aparte, no contractual).
-4. **Túnel**: `az network bastion tunnel` es **un POST HTTPS a `https://{dnsName}/api/tokens`
-   + un WebSocket `wss://{dnsName}/webtunnelv2/{websocketToken}?X-Node-Id={nodeId}` con
-   frames binarios = bytes TCP crudos**, sin framing propio (a diferencia del relay IAP).
-   Es trivial de implementar en Swift con el `NIOWebSocketTransport` que ya tenemos, **pero
-   el protocolo no está documentado** (🔍): riesgo de rotura sin aviso.
-5. **Dos caminos de transporte, explícitamente distintos** (§3.7):
-   **(a) túnel nativo Swift** reimplementando el protocolo del CLI (no documentado) vs
-   **(b) delegar en el `az` instalado por el usuario** (documentado/soportado, requiere Azure CLI).
+4. **Túnel** (protocolo exacto en §3.3, con archivo y línea): **ninguna llamada ARM abre el
+   túnel** ni devuelve un `tunnelUri`. ARM solo se usa para leer el Bastion (`dnsName`, SKU,
+   `enableTunneling`). El túnel es **plano de datos del Bastion**, todo en `{dnsName}:443`:
+   `POST https://{dnsName}/api/tokens` (form-urlencoded, el token ARM va **en el cuerpo**,
+   campo `aztoken`) → `{authToken, nodeId, websocketToken}` →
+   `wss://{dnsName}/webtunnelv2/{websocketToken}?X-Node-Id={nodeId}` **sin subprotocolo, sin
+   Authorization, sin mensaje inicial** → frames binarios = bytes TCP crudos →
+   `DELETE https://{dnsName}/api/tokens/{authToken}`. El protocolo **no está documentado** (🔍).
+5. **DECISIÓN DEL DUEÑO (2026-10-20): Ruta 1 = túnel nativo en Swift** (`BastionTunnel`).
+   La Ruta 2 (delegar en el `az` del usuario) **no se implementa**: queda como **plan B**
+   documentado (§3.5), que solo se activa con los disparadores de §3.7.
 6. **Limitación crítica de RDP**: el login RDP con **Entra ID vía Bastion no es posible desde
    macOS** — Microsoft solo lo permite con `az network bastion rdp` (Windows-only) y desde PCs
    Windows 10+ unidos/registrados en el mismo directorio (§3.6). Desde Mac: credenciales
    locales/dominio en la VM, o un jump host Windows unido a Entra.
-7. **Recomendación**: entregar primero auth + árbol Azure (read-only, 100 % documentado) y
-   conexión vía **(b) `az`**; luego **(a)** detrás de feature flag con fallback automático a (b).
-   Hay precedente comercial casi idéntico en macOS (TYO Reach, §8): el problema está validado.
+7. **Plan**: spike de protocolo en Swift contra un Bastion real (F0) → auth Entra + árbol
+   (F1) → `BastionTunnel` nativo con SSH/SFTP/RDP (F2) → endurecimiento (F3). Plan de
+   implementación detallado en §9; equivalencias Swift ↔ `az` en §10.
+   Precedente comercial casi idéntico en macOS (TYO Reach, §8).
 
-Veredicto global: **GO por fases** (detalle en §6.4).
+Veredicto global: **GO** con la Ruta 1, condicionado a que F0 pase sus criterios de aceptación
+(detalle en §6.4).
 
 ---
 
@@ -63,8 +68,9 @@ Veredicto global: **GO por fases** (detalle en §6.4).
 | Reuso en el repo | `PKCE.swift`, `AuthorizeURL.swift`, `LoopbackReceiver.swift`, `LoginSession.swift` | Nada (polling nuevo) |
 | Redirect URI | Necesaria (`http://localhost`) | No necesaria |
 
-**Decisión: auth code + PKCE (S256) con loopback**. Device code queda como opción manual
-"no puedo abrir navegador" (fase posterior, NO-GO por ahora).
+**Decisión: auth code + PKCE (S256) con loopback**. Device code queda como **fallback manual**
+("Iniciar sesión con código") en F1 (§9.1). Se espera que falle en tenants con la política de
+CA recomendada por Microsoft, y la UI lo explica en ese caso.
 
 Detalles documentados que afectan al diseño (✅ fuentes arriba y
 [reply-url](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url)):
@@ -243,50 +249,170 @@ IP‑connect (`--target-ip-address` en lugar de `--target-resource-id`): requier
 y activar *IP-based connection*; sin Entra para RDP, sin custom ports
 ✅ [connect-ip-address](https://learn.microsoft.com/en-us/azure/bastion/connect-ip-address).
 
-### 3.3 Cómo funciona por dentro `az network bastion tunnel` 🔍
+### 3.3 Protocolo exacto de `az network bastion tunnel` 🔍
 
-Fuente: [`azure-cli-extensions/src/bastion/azext_bastion/tunnel.py`](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/tunnel.py)
-y [`custom.py`](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/custom.py)
-(extensión `bastion` 1.4.3, [`HISTORY.rst`](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/HISTORY.rst)).
+**Dónde está el código.** `az network bastion tunnel|ssh|rdp` **no está en
+`github.com/Azure/azure-cli`**: el módulo `network` del core no registra ningún comando
+`bastion tunnel/ssh/rdp` (verificado con `grep` sobre
+`src/azure-cli/azure/cli/command_modules/network/` en el commit `fa8fb564`). Vive en la
+**extensión `bastion`** de `github.com/Azure/azure-cli-extensions` (v1.4.3), que el CLI
+instala sola al primer uso. Lo único que aporta `azure-cli-core` es el token ARM.
 
-1. `GET` del Bastion por ARM (`az network bastion show`) → `sku.name`, `enableTunneling`, `dnsName`.
-   Endpoint = `properties.dnsName` (p. ej. `bst-<guid>.bastion.azure.com`).
-2. Abre un **socket TCP local** (`localhost`, puerto pedido o 0 = efímero) y por **cada
-   conexión aceptada**:
-3. **Token de sesión** — `POST https://{dnsName}/api/tokens`, `Content-Type:
-   application/x-www-form-urlencoded`, campos:
+Permalinks fijados a los commits leídos (2026-10-20):
 
-   | campo | valor |
-   |---|---|
-   | `resourceId` | ID ARM completo de la VM (o `…/providers/Microsoft.Network/bh-hostConnect/{ip}` en IP‑connect) |
-   | `protocol` | `tcptunnel` |
-   | `workloadHostPort` | puerto destino (22/3389/custom) |
-   | `aztoken` | **access token ARM del usuario** (audiencia `management.core.windows.net`) |
-   | `token` | `authToken` de la llamada anterior (vacío la primera vez) |
-   | `hostname` | solo IP‑connect: IP destino |
+- `EXT` = `https://github.com/Azure/azure-cli-extensions/blob/3fcfaeb4374d57bbe54b087d7dd35af41a528f85/src/bastion/azext_bastion`
+- `CORE` = `https://github.com/Azure/azure-cli/blob/fa8fb564d07b533849f999f061d5102f4644a232/src/azure-cli-core/azure/cli/core`
+- `WSC` = `https://github.com/websocket-client/websocket-client/blob/v1.8.0/websocket` (versión fijada por azure-cli: `websocket-client==1.8.0` en `src/azure-cli/requirements.py3.Darwin.txt`)
 
-   Header `X-Node-Id: <nodeId>` si ya hay uno. Respuesta 200 JSON:
-   `{ "authToken": …, "nodeId": …, "websocketToken": … }`. Error ≠200: JSON con `message`.
-4. **WebSocket**: `wss://{dnsName}/webtunnelv2/{websocketToken}?X-Node-Id={nodeId}`
-   (Developer/QuickConnect: `wss://{dataPod}/omni/webtunnel/{websocketToken}`, con `dataPod`
-   obtenido de `POST https://{dnsName}/api/connection` JSON `{resourceId, bastionResourceId,
-   vmPort, azToken, connectionType:"nativeclient"}` — ver
-   [`developer_sku_helper.py`](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/developer_sku_helper.py)).
-   - **Sin headers de auth en el upgrade, sin subprotocolo**: la autorización va en el path
-     (`websocketToken`). TLS con verificación normal. `TCP_NODELAY`.
-5. **Framing**: ninguno propio. Cliente→Bastion: `send_binary(bytes)` en trozos de ≤4096;
-   Bastion→cliente: cada mensaje recibido se escribe tal cual al socket. Cierre de cualquiera
-   de los dos lados cierra el otro. **No hay** ACK/SID/reconexión como en el relay IAP
-   (`SshRelayFormat`), ni keepalive aplicativo explícito.
-6. **Limpieza**: cuando la última conexión local se cierra →
-   `DELETE https://{dnsName}/api/tokens/{authToken}` con `X-Node-Id`; 404 = ya borrada.
+| Qué | Archivo:líneas |
+|---|---|
+| Registro de comandos (`tunnel` → `create_bastion_tunnel`) | `EXT/commands.py` L14‑21 |
+| Parámetros del comando | `EXT/_params.py` L25‑31, L48‑50 |
+| Orquestación del túnel | `EXT/custom.py` L452‑495 |
+| Gate de SKU | `EXT/custom.py` L461‑463, L383‑396 |
+| IP‑connect | `EXT/custom.py` L373‑380, L465‑472 |
+| Endpoint (dnsName vs data pod) | `EXT/custom.py` L416‑422 |
+| Listener local | `EXT/custom.py` L431‑438; `EXT/tunnel.py` L41‑66, L116‑127 |
+| POST `/api/tokens` | `EXT/tunnel.py` L80‑114 |
+| WebSocket | `EXT/tunnel.py` L129‑152 |
+| Bombeo WS → TCP | `EXT/tunnel.py` L163‑183 |
+| Bombeo TCP → WS | `EXT/tunnel.py` L185‑205 |
+| Cierre / DELETE | `EXT/tunnel.py` L155‑159, L210‑230 |
+| Developer/QuickConnect data pod | `EXT/developer_sku_helper.py` L9‑29 |
+| GET del Bastion por ARM (aaz) | `EXT/aaz/latest/network/bastion/_show.py` L25‑27, L90, L124 |
+| Scope del token ARM | `CORE/_profile.py` L141, L379‑388; `CORE/cloud.py` L371; `CORE/auth/util.py` L92‑104 |
+| Headers del upgrade WS | `WSC/_handshake.py` L82‑137 |
 
-Comparación con lo que ya tenemos (`specs/tunnel/transport-decision.md`): el relay IAP exige
-headers (`Authorization`, `Origin`), subprotocolo y framing con ACKs; **Bastion es más simple**.
-El `NIOWebSocketTransport` actual sirve casi tal cual (quitando headers/subprotocolo) y
-`URLSessionWebSocketTask` también bastaría aquí (la razón para descartarlo en IAP — control de
-subprotocolo/headers — no aplica), salvo **proxy CONNECT**, donde NIO sigue siendo mejor
-→ reutilizar NIO.
+#### Respuestas concretas a las preguntas del dueño
+
+**(1) ¿Qué llamada ARM abre el túnel? ¿Devuelve `tunnelUri`?**
+**Ninguna. No existe `tunnelUri`.** La única llamada ARM es de **lectura**:
+
+```http
+GET https://management.azure.com/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/bastionHosts/{name}?api-version=2024-01-01
+Authorization: Bearer <token ARM>
+```
+
+(`_show.py` L27/L90/L124). De la respuesta se usan `sku.name`, `properties.enableTunneling`,
+`properties.enableIpConnect` y `properties.dnsName` (`custom.py` L461‑463, L375, L422).
+El "abrir túnel" es el `POST /api/tokens` del paso 3, contra el **plano de datos del Bastion**
+(`{dnsName}`), no contra ARM. En Swift podemos usar la api-version más reciente
+`2026-01-01` (§2), que devuelve las mismas propiedades.
+
+**(2) ¿Cómo se abre el WebSocket? URL, subprotocolos, headers, primer mensaje.**
+
+Secuencia por **cada conexión TCP aceptada** en el puerto local (`tunnel.py` L129‑136):
+
+**Paso 3: token de sesión** (`tunnel.py` L80‑114):
+
+```http
+POST https://{dnsName}/api/tokens HTTP/1.1
+Host: {dnsName}
+Content-Type: application/x-www-form-urlencoded
+X-Node-Id: {nodeId}            ← solo si ya hay uno de una conexión anterior (L93‑96)
+
+resourceId={vmResourceId}&protocol=tcptunnel&workloadHostPort={22|3389|n}&aztoken={accessTokenARM}[&token={authTokenAnterior}][&hostname={ip}]
+```
+
+| Campo | Valor | Línea |
+|---|---|---|
+| `resourceId` | ID ARM completo de la VM. IP‑connect: `/subscriptions/{sub}/resourceGroups/{rg}/providers/Microsoft.Network/bh-hostConnect/{ip}` | L85, `custom.py` L467‑468 |
+| `protocol` | literal `tcptunnel` | L86 |
+| `workloadHostPort` | puerto de la VM (`--resource-port`) | L87 |
+| `aztoken` | **access token ARM en claro, en el cuerpo** | L83, L88 |
+| `token` | `authToken` de la respuesta anterior; **se omite** en la primera (requests descarta valores `None`: `requests/models.py` v2.32.3 L125) | L89 |
+| `hostname` | solo IP‑connect: la IP destino | L91‑92 |
+
+- Sin `Authorization`; `requests` añade sus headers por defecto (`User-Agent: python-requests/…`, `Accept: */*`).
+- **200** → JSON `{"authToken": "...", "nodeId": "...", "websocketToken": "..."}` (L112‑114).
+  **≠200** → `HttpResponseError` con `response_json["message"]` si viene (L107‑110).
+
+**Paso 4: WebSocket** (`tunnel.py` L136‑142):
+
+```
+wss://{dnsName}/webtunnelv2/{websocketToken}?X-Node-Id={nodeId}
+```
+
+Headers del upgrade, tal como los genera `websocket-client` 1.8.0 sin opciones extra
+(`_handshake.py` L85‑123):
+
+```http
+GET /webtunnelv2/{websocketToken}?X-Node-Id={nodeId} HTTP/1.1
+Upgrade: websocket
+Host: {dnsName}
+Origin: https://{dnsName}
+Sec-WebSocket-Key: <aleatoria>
+Sec-WebSocket-Version: 13
+Connection: Upgrade
+```
+
+- **Sin `Sec-WebSocket-Protocol`**: `create_connection` no recibe `subprotocols`.
+- **Sin `Authorization`** ni cookies del POST: son librerías distintas (`requests` vs
+  `websocket-client`), así que no hay sesión HTTP compartida. La afinidad la dan `nodeId` en
+  la query y el `websocketToken` en el path.
+- Socket con `TCP_NODELAY=1` y verificación TLS `CERT_REQUIRED` (L138‑141).
+- **Sin mensaje inicial ni handshake aplicativo.** Destino, puerto e identidad quedaron
+  fijados en el servidor durante el POST. El `websocketToken` del path es la credencial de un
+  solo uso. Tras el `101 Switching Protocols` se pasa directamente a bytes del protocolo de
+  la VM; con SSH, lo primero que llega es el banner `SSH-2.0-…` del servidor.
+- Developer/QuickConnect: `wss://{dataPod}/omni/webtunnel/{websocketToken}`, sin `X-Node-Id`
+  (L132‑134). `dataPod` se obtiene con `POST https://{dnsName}/api/connection` en JSON
+  `{resourceId, bastionResourceId, vmPort, azToken, connectionType:"nativeclient"}`
+  (`developer_sku_helper.py` L15‑29). **El comando `tunnel` rechaza Developer** (gate L461‑463:
+  solo Standard/Premium); solo `ssh` lo admite (L183, L391‑393). Fuera de alcance.
+
+**(3) Formato del tráfico y cierre.**
+
+- **TCP → WS** (`tunnel.py` L187‑195): lee hasta **4096 B** del socket local y envía un frame
+  **binario** (opcode `0x2`, `send_binary`) por lectura. Sin cabecera, longitud ni ACK propios.
+- **WS → TCP** (L167‑173): cada mensaje recibido se escribe tal cual al socket local. Se
+  esperan frames binarios: un frame de texto llegaría como `str` y `socket.send` fallaría, así
+  que en la práctica el servidor solo envía binario.
+- **Keepalive**: el CLI no envía pings (`create_connection` sin `ping_interval`). Sí responde
+  con pong a los pings del servidor (comportamiento estándar de `websocket-client`).
+- **Cierre**:
+  - EOF local (`recv_into` = 0) → cierra socket y WS (Close 1000) (L197‑205).
+  - Close o mensaje vacío del WS → cierra el socket local (L175‑183).
+  - Cuando no queda ninguna conexión activa → `DELETE https://{dnsName}/api/tokens/{authToken}`
+    con `X-Node-Id`. 200/204 = OK, **404 = sesión ya borrada** (L155‑159, L210‑228).
+  - Ctrl+C → `cleanup()` (`custom.py` L445‑449, L489).
+- **No hay** SID, ACK, reconexión ni reanudación, a diferencia del relay IAP (`SshRelayFormat`).
+  Si el WS cae, la conexión TCP muere y hay que repetir POST + WS.
+
+**(4) ¿Token ARM en query string o header?**
+**En ninguno de los dos: va en el cuerpo form-urlencoded del `POST /api/tokens`, campo
+`aztoken`** (L88). Ni la query ni los headers del WS llevan token ARM. La query solo lleva
+`X-Node-Id` (no es secreto) y el path el `websocketToken` (sí es secreto, de un solo uso, nunca
+se registra en logs). El token se pide con scope `https://management.core.windows.net//.default`
+(`_profile.py` L141 y L388 → `cloud.py` L371 → `auth/util.py` L104).
+
+**(5) Puertos y hosts: 443 vs 8081.**
+
+| Host | Puerto | Para qué |
+|---|---|---|
+| `login.microsoftonline.com` | 443 | Tokens Entra |
+| `management.azure.com` | 443 | ARM (descubrimiento + GET del Bastion) |
+| `{dnsName}` (p. ej. `bst-<guid>.bastion.azure.com`) | **443** | `POST/DELETE /api/tokens` y `wss://…/webtunnelv2/…` (URLs sin puerto explícito, L99/L136/L219) |
+| `127.0.0.1` | efímero (`--port`, 0 = auto, `custom.py` L434‑436) | Listener local (CLI) |
+
+**8081 no aparece** en el código de la extensión (`grep` de `8081` en `azext_bastion/` sin
+resultados) **ni en la documentación**. El único `8080` es un ejemplo de reenvío `-L` en
+`_help.py` L29. **No hay ningún caso en que el cliente use otro puerto que 443.** 8080 y 5701
+son puertos internos entre instancias de Bastion ✅ [bastion-nsg](https://learn.microsoft.com/en-us/azure/bastion/bastion-nsg).
+
+#### Diferencias con IAP (lo que ya tenemos)
+
+| | IAP (TunnelKit hoy) | Bastion |
+|---|---|---|
+| Auth | `Authorization: Bearer` en el upgrade | Token ARM en el cuerpo del POST previo; WS autorizado por path |
+| Subprotocolo | `relay.tunnel.cloudproxy.app` | ninguno |
+| Framing | `SshRelayFormat` (tags, ACK, SID, reconnect) | ninguno (binario crudo) |
+| Paso previo | — | `POST /api/tokens` (+ `DELETE` al cerrar) |
+| Reconexión | sí (SID + ack) | no |
+
+Nota sobre la matriz de §3.2b: la doc dice "Custom port: No" para `tunnel`, pero el código solo
+restringe el puerto en IP‑connect (`custom.py` L470‑472). Con `--target-resource-id` cualquier
+`--resource-port` llega al servidor. ⚠️ Lo validamos en el spike F0.
 
 ### 3.4 ¿Implementable en Swift? Sí — y mejor que el CLI para SSH
 
@@ -302,12 +428,26 @@ subprotocolo/headers — no aplica), salvo **proxy CONNECT**, donde NIO sigue si
 - **Qué es inestable** (⚠️): rutas `/api/tokens`, `/webtunnelv2/`, `/omni/webtunnel/`,
   `/api/connection`, nombres de campos y semántica de `X-Node-Id` **no están en Microsoft
   Learn ni en la REST reference**. Han cambiado antes (la extensión pasó por "bug fixes for
-  tunnel" en 1.3.0 y 1.4.2). Mitigación: detección de error tipada (`BastionTunnelError.protocolChanged`)
-  + **fallback automático al CLI** + test de contrato contra un Bastion real en CI manual.
+  tunnel" en 1.3.0 y 1.4.2). Mitigación con la Ruta 1 elegida:
+  - errores tipados (`BastionTunnelError.protocolChanged`);
+  - test de contrato e2e contra un Bastion real antes de cada release (§9.5);
+  - vigilar `azure-cli-extensions/src/bastion/HISTORY.rst` en cada release del CLI;
+  - plan B (§3.5) **listo en papel**, sin implementar.
+- **Elección de librería WebSocket**: **SwiftNIO + WebSocketKit** (`NIOWebSocketTransport`
+  existente, parametrizado). `URLSessionWebSocketTask` sería técnicamente suficiente porque
+  Bastion no pide subprotocolo ni headers especiales, pero NIO ya está probado, soporta proxy
+  CONNECT (`ProxyConfig`) y lo cubren los tests de TunnelKit.
+  `Origin: https://{dnsName}` se replica a mano para igualar exactamente al CLI.
+- **Listener local** (RDP, y opcionalmente `ssh`/`scp` externos): `Network.framework`
+  `NWListener` en `127.0.0.1`, que ya existe como `IapListener` (valida que el cliente sea
+  loopback y cuenta estadísticas). Se reutiliza con otro `StreamFactory`.
 - Licencia: la extensión es MIT; reimplementar el protocolo (no copiar código) es compatible
   con Apache‑2.0. Citar la fuente en el código.
 
-### 3.5 Fallback pragmático: delegar en el `az` del usuario (contractual)
+### 3.5 Plan B (no se implementa salvo disparador): delegar en el `az` del usuario
+
+> Por decisión del dueño, esta ruta **no forma parte del plan**. Se documenta para poder
+> activarla rápido (≈ 4–5 d) si se cumple algún disparador de §3.7.
 
 Lo único **documentado** para clientes no Windows es `az network bastion tunnel` ✅
 ([native-client § Connecting to VMs](https://learn.microsoft.com/en-us/azure/bastion/native-client)):
@@ -377,12 +517,17 @@ Diseño del fallback (`AzCliBastionTunnel`):
 | Superficie / mantenimiento | ~600–900 LOC + mock server + test de contrato | ~300 LOC (detección, proceso, puertos, errores) |
 | UX | Óptima (sin dependencias) | Aceptable (instalar CLI, login doble) |
 
-**Veredictos** (ver plan §6.4):
+**Decisión (dueño, 2026-10-20): Ruta 1 = (a) túnel nativo Swift.**
 
-- **(b) `az` delegado — GO** como primer camino de conexión (F2) y como **fallback permanente**.
-- **(a) nativo Swift — GO condicional**: solo si el spike F0 confirma que Bastion acepta tokens
-  de nuestra app registration; siempre detrás de flag y con fallback automático a (b) ante
-  `protocolChanged`. NO-GO como único camino.
+- **(a) nativo Swift — GO, ruta principal y única implementada.** Condición de entrada: el
+  spike F0 (§9.6) debe pasar sus criterios. Si F0 falla por R2 (Bastion rechaza tokens de
+  nuestra app registration), se vuelve al dueño con evidencia antes de seguir.
+- **(b) `az` delegado — NO-GO para implementar ahora; plan B.** Disparadores para activarlo:
+  1. F0 demuestra que Bastion no acepta tokens de una app registration de terceros;
+  2. en producción, un cambio de protocolo rompe (a) y el arreglo tarda más de una release;
+  3. hace falta SSH con Entra (`--auth-type AAD`), que solo es viable vía `az` (§3.5 punto 6).
+- Mientras tanto, la UI no menciona el CLI. El error `protocolChanged` muestra "Bastion cambió
+  su protocolo; actualiza la app" y registra en el log el status y la versión observada.
 
 ---
 
@@ -432,18 +577,20 @@ flowchart TB
   APS --> DISC --> ARM
 
   subgraph BastionKit [BastionKit (nuevo, depende de TunnelKit)]
-    BT[BastionTunnelStream<br/>POST /api/tokens + WSS]
-    CLI[AzCliBastionTunnel<br/>fallback az]
-    SEL[BastionTransportSelector]
+    BSC[BastionSessionClient<br/>POST/DELETE /api/tokens]
+    BT[BastionTunnelStream<br/>WSS binario]
+    FWD[BastionLocalForwarder<br/>NWListener 127.0.0.1]
   end
-  APS --> SEL --> BT
-  SEL --> CLI
+  APS --> BT
+  BT --> BSC
   BT --> WS[NIOWebSocketTransport<br/>TunnelKit existente]
 
   APS --> SSH[SshSession / SFTPKit / TerminalUI<br/>existentes]
   SSH -. SshByteStream .-> BT
-  APS --> LST[IapListener loopback<br/>existente] --> RDP[RDPBridge → Windows App]
-  LST -. streamFactory .-> SEL
+  APS --> FWD --> RDP[RDPBridge → Windows App]
+  FWD -. un BastionTunnelStream por conexión .-> BT
+  CLI[(Plan B: AzCliBastionTunnel<br/>no implementado)]:::planb
+  classDef planb stroke-dasharray: 5 5
 
   APS --> UI[ExplorerWindowController<br/>dataSourceLabel: Azure]
 ```
@@ -553,11 +700,8 @@ public actor BastionTunnelStream: SshByteStream {
     public func close() async               // DELETE /api/tokens/{authToken}
 }
 
-/// Elige nativo o CLI; ante `.protocolChanged` cae al CLI y lo recuerda en settings.
-public struct BastionTransportSelector: Sendable {
-    public enum Mode: String, Sendable { case automatic, nativeOnly, azCLIOnly }
-    public func openStream(_ target: BastionTarget) async throws -> any SshByteStream
-}
+// (Ruta 1: sin selector de transporte. Si se activa el plan B, se introduce aquí un
+//  `BastionTransportSelector` que envuelva `BastionTunnelStream` y `AzCliBastionTunnel`.)
 ```
 
 ```swift
@@ -568,7 +712,7 @@ final class AzureProfileSession: NSObject {
     let environment: ProfileEnvironment
     let credentials: AzureCredentialFacade
     private lazy var discovery = AzureDiscovery(arm: ArmClient(token: { try await self.credentials.accessToken(tenantID: $0) }))
-    private lazy var transports = BastionTransportSelector(/* token, opener, az path */)
+    private lazy var tunnels = BastionTunnelFactory(/* token ARM por tenant, opener NIO, proxy */)
     private var sshSessions: [String: SshSession] = [:]       // igual que ProfileSession
     private var terminalTabs: TerminalTabManager?
     func openWindow()                                          // ExplorerWindowController(dataSourceLabel: "Azure")
@@ -631,15 +775,16 @@ Bastion transporta bytes; **la autenticación SSH/RDP sigue siendo con la VM**:
 
 | # | Riesgo | Prob. | Impacto | Mitigación |
 |---|---|---|---|---|
-| R1 | Protocolo `/api/tokens` + `/webtunnelv2` cambia (no documentado 🔍) | Media | Alto (túnel nativo roto) | Fallback automático al `az`; test de contrato manual por release; versión de extensión observada en logs |
-| R2 | Bastion rechaza tokens de nuestra app registration (audiencia/appid) ⚠️ | Baja‑media | Bloqueante para nativo | Spike F0 antes de invertir; usar audiencia `management.core.windows.net`; si falla → solo CLI |
+| R1 | Protocolo `/api/tokens` + `/webtunnelv2` cambia (no documentado 🔍) | Media | Alto (túnel nativo roto; es la única ruta) | Test e2e de contrato antes de cada release (§9.5); vigilar `HISTORY.rst` de la extensión; error `protocolChanged` explícito; plan B listo en papel (§3.5, ≈ 4–5 d) |
+| R2 | Bastion rechaza tokens de nuestra app registration (audiencia/appid) ⚠️ | Baja‑media | Bloqueante para la Ruta 1 | Spike F0 antes de invertir; usar audiencia `management.core.windows.net`; si falla → escalar al dueño (disparador 1 del plan B) |
 | R3 | Clientes con Basic/Developer (sin native client) | Alta | Funcionalidad nula para ellos | Mensaje claro en el árbol; doc de upgrade ✅ [upgrade-sku](https://learn.microsoft.com/en-us/azure/bastion/upgrade-sku) |
 | R4 | Tenants con user consent deshabilitado | Alta en empresas | Login falla con `consent_required` | Documentar admin consent URL; mensaje específico |
 | R5 | Conditional Access (MFA, device compliance, token protection) | Media | Login/refresh falla | Navegador del sistema (cumple MFA); errores `interaction_required` → re-login; no usar device code |
 | R6 | Coste: Bastion cobra por hora desde que existe, no por uso | Cierta | Coste para el dueño/clientes y para nuestras pruebas | Pruebas con despliegue efímero (crear → probar → borrar, ~10 min de deploy) |
 | R7 | Peering/hub‑spoke: emparejar VM↔Bastion mal | Media | Botón Connect deshabilitado erróneamente | Selector manual de Bastion por VM, recordado en settings |
 | R8 | Duplicación de `ProfileSession` | Media | Deuda | Extraer `ProfileSessionHosting` en F1 |
-| R9 | Dependencia del `az` del usuario (fallback) | — | Instalación extra, sesión ajena al perfil | Detección + mensaje "instala con `brew install azure-cli`"; verificar tenant |
+| R9 | Secretos en tránsito/logs: `aztoken` en el cuerpo del POST, `websocketToken` en el path del WS | Media | Fuga de credenciales en logs | `description` redactado (como `SshConnector`); nunca registrar URLs del WS; tests que verifiquen la redacción |
+| R10 | Sesión larga (> vida del access token ≈ 1 h) | Media | Desconexión a mitad de sesión | Medir en F0; si el servidor corta, re‑POST con `token` + `X-Node-Id` y aviso en la pestaña (F3) |
 
 ### 6.2 Costo por hora de Bastion por SKU
 
@@ -676,42 +821,47 @@ los importes por JS).
 
 | Fase | Contenido | Esfuerzo | Depende de | Veredicto |
 |---|---|---|---|---|
-| **F0 — Spike de validación** | Bastion Standard efímero en suscripción de prueba; app registration multi‑tenant propia; script/CLI de prueba (Swift en `Spikes/`) que haga POST `/api/tokens` + WSS y un `ssh -p` por puerto local. Confirmar R2 (audiencia/appid), cierre, expiración de token. | 2–3 d + ~2–4 h de Bastion (≈ $1) | Suscripción Azure del dueño | **GO** |
-| **F1 — Identidad + árbol (read‑only)** | `CloudProvider` en `ProfileDescriptor`; `EntraAuthorizer`/`AzureCredentialFacade` (PKCE, refresh por tenant, Keychain `.azure`); `ArmClient` + `AzureDiscovery`; nodos Azure en `ExplorerNode`; `ProfileSessionHosting`; Properties. 100 % API documentada. | 6–9 d | — (puede ir en paralelo a F0) | **GO** |
-| **F2 — Conexión vía (b) `az` (contractual)** | `AzCliBastionTunnel` (detección, puerto, `Process`, ready, SIGINT); SSH (`SshSession` sobre NWConnection loopback) + SFTP; RDP con `RDPBridge` y credenciales locales/dominio (§3.6); credenciales VM en Keychain; mensajes de SKU/RBAC/Entra‑RDP. | 4–5 d | F1 | **GO** — camino recomendado para la primera versión usable |
-| **F2b — SSH Entra vía (b)** | Pestaña de terminal de proceso local que ejecuta `az network bastion ssh --auth-type AAD`. | 2–3 d | F2 | **GO condicional** (si el dueño tiene VMs Linux con `AADSSHLoginForLinux`) |
-| **F3 — Túnel (a) nativo Swift** | `BastionTunnelStream` (NIO WS sin subprotocolo, binario, DELETE al cerrar), `BastionTransportSelector` con fallback a (b), `IapListener` factory para RDP, tests con mock server (patrón `specs/tunnel/mock-server.md`), feature flag *Settings → Azure → Transporte*. | 6–8 d | F0 positivo + F2 | **GO condicional** (solo si F0 confirma R2; detrás de flag, default `automatic`). **NO-GO como único transporte.** |
-| **F4 — Extras** | Device code; login Entra SSH nativo (`az ssh cert`); reset de contraseña local / llave efímera vía `runCommand`/VMAccess; IP‑connect; Developer SKU (`/omni/webtunnel`); Arc; Entra RDP desde Mac. | 8–15 d | F3 | **NO-GO** por ahora (no documentado, bajo valor o imposible en plataforma — Entra RDP); reevaluar con demanda real |
+Ruta 1 (túnel nativo Swift) fijada por el dueño. Criterios de aceptación detallados en §9.6.
 
-Total hasta F3: **≈ 18–25 días‑persona** (+2–3 d si F2b). Valor entregable desde F2 (≈ 12–17 d).
+| Fase | Contenido | Esfuerzo | Depende de | Veredicto |
+|---|---|---|---|---|
+| **F0 — Spike de protocolo en Swift** | `Spikes/BastionSpike` (ejecutable SwiftPM fuera de `Sources/`): token Entra con **nuestra** app registration → GET Bastion → `POST /api/tokens` → WSS → listener local → `ssh -p` y Windows App reales; `DELETE` al cerrar. Medir: aceptación del token (R2), custom port, sesión > 1 h, cierre. | 2–3 d + ~3 h de Bastion Standard (≈ $1) | Suscripción de prueba del dueño | **GO** (hacerlo ya; decide todo lo demás) |
+| **F1 — AzureAuth + AzureARMClient + árbol** | §9.1, §9.2, §9.4 (parte UI read‑only). 100 % API documentada. | 7–10 d | — (en paralelo a F0) | **GO** |
+| **F2 — BastionTunnel nativo + conexión** | §9.3 completo: `BastionSessionClient`, `BastionTunnelStream`, `BastionLocalForwarder`; SSH in‑process + SFTP, RDP vía Windows App; tests §9.5 con servidor WS falso. | 7–9 d | F0 verde + F1 | **GO** (ruta principal) |
+| **F3 — Endurecimiento** | Proxy CONNECT, renovación de sesión (re‑POST con `token`/`X-Node-Id`), multi‑pestaña, telemetría local de errores, e2e manual pre‑release, `docs/usage.md` §13. | 3–4 d | F2 | **GO** |
+| **Plan B — `az` delegado** | §3.5 (`AzCliBastionTunnel`) | 4–5 d (si se activa) | Disparador §3.7 | **NO-GO** salvo disparador |
+| **F4 — Extras** | SSH con Entra (certificados `az ssh cert` o vía plan B); reset de contraseña local / llave efímera vía `runCommand`; IP‑connect; Developer SKU (`/omni/webtunnel`); Arc; RDP con Entra desde Mac (imposible, §3.6). | 8–15 d | F3 | **NO-GO** por ahora |
 
-Recomendación por fase, en una línea:
+Total F0–F3: **≈ 19–26 días‑persona**. Primera versión usable al cerrar F2 (≈ 16–22 d).
 
-- **F0**: hacerlo ya; es barato y decide si (a) vale la pena.
-- **F1**: hacerlo en paralelo a F0; todo documentado, sin riesgo de protocolo.
-- **F2**: entregar con (b) como única vía soportada en la primera versión pública.
-- **F2b**: solo si hay demanda de Entra SSH.
-- **F3**: solo con F0 en verde; (a) como optimización de UX, nunca sin fallback a (b).
-- **F4**: no planificar.
+Recomendación por fase:
+
+- **F0**: hacerlo ya. Si falla R2 o el WS no levanta, se detiene todo y se escala al dueño.
+- **F1**: en paralelo a F0; no depende del protocolo no documentado.
+- **F2**: cuando F0 esté verde. Es la entrega principal.
+- **F3**: inmediatamente después de F2, antes de anunciar la feature.
+- **Plan B / F4**: no planificar.
 
 ---
 
 ## 7. (g) Issues hijos propuestos
 
-1. **GH-84.1 — Spike F0: validar túnel Bastion con token de app registration propia**
-   (Spikes/, no producción; criterio: SSH funcional a VM vía WSS nativo, informe de R2/expiración).
+Ordenados según la Ruta 1:
+
+1. **GH-84.1 — F0: spike `Spikes/BastionSpike` (Swift) contra Bastion Standard real** — criterios A0.x de §9.6.
 2. **GH-84.2 — Spec `specs/azure/{requirements,design,tasks}.md`** (EARS, a partir de este documento).
 3. **GH-84.3 — AuthKit: `CloudProvider` en `ProfileDescriptor` + migración retrocompatible**.
-4. **GH-84.4 — AuthKit: `EntraAuthorizer` + `AzureCredentialFacade` (PKCE, refresh por tenant, Keychain `.azure`, purge)**.
-5. **GH-84.5 — Nuevo módulo `AzureClient`: `ArmClient` (paginación) + `AzureDiscovery` (tenants/subs/RG/VM/NIC/Bastion)** con tests `URLProtocol`.
-6. **GH-84.6 — App: extraer `ProfileSessionHosting` de `ProfileSession`; `ProfileCoordinator` multi‑proveedor**.
-7. **GH-84.7 — ExplorerUI: nodos Azure (tenant → suscripción → RG → VM) + Properties + estado de Bastion**.
-8. **GH-84.8 — BastionKit: `AzCliBastionTunnel` (fallback `az`) + Connect SSH/SFTP/RDP**.
-9. **GH-84.9 — BastionKit: `BastionTunnelStream` nativo + `BastionTransportSelector` + mock server** (bloqueado por GH-84.1).
-10. **GH-84.10 — Docs: `docs/usage.md` §13 "Azure" (app registration, admin consent, SKU Standard + Native Client, RBAC, costes)**.
-11. **GH-84.11 — (Backlog, NO-GO) Entra SSH nativo / llave efímera por `runCommand` / Developer SKU / Arc / Entra RDP desde Mac**.
-12. **GH-84.12 — (GO condicional) SSH Entra vía `az network bastion ssh --auth-type AAD` en pestaña de proceso local** (F2b).
-13. **GH-84.13 — (Independiente) Modo de conexión "Direct" a IP privada** (sirve para VPN P2S, Entra Private Access, Tailscale/NetBird, jump host).
+4. **GH-84.4 — AuthKit: `EntraAuthorizer` (PKCE + device code de fallback) + `AzureCredentialFacade` (refresh por tenant, Keychain `.azure`, purge)**.
+5. **GH-84.5 — Nuevo módulo `AzureClient`: `AzureARMClient` (paginación) + `AzureDiscovery`** con tests `URLProtocol`.
+6. **GH-84.6 — App: extraer `ProfileSessionHosting`; `ProfileCoordinator` multi‑proveedor; `AzureProfileSession`**.
+7. **GH-84.7 — ExplorerUI: nodos Azure + Properties + estado/selector de Bastion**.
+8. **GH-84.8 — BastionKit: `BastionSessionClient` + `BastionTunnelStream` + servidor WS falso de tests** (bloqueado por 84.1).
+9. **GH-84.9 — BastionKit: `BastionLocalForwarder` + Connect SSH/SFTP (in‑process) y RDP (Windows App)**.
+10. **GH-84.10 — F3: proxy CONNECT, renovación de sesión, test e2e de contrato pre‑release**.
+11. **GH-84.11 — Docs: `docs/usage.md` §13 "Azure"** (app registration, admin consent, SKU Standard + Native Client, RBAC, costos, limitación de RDP con Entra).
+12. **GH-84.12 — (Plan B, no planificado) `AzCliBastionTunnel`**: solo se abre si se cumple un disparador de §3.7.
+13. **GH-84.13 — (Backlog NO-GO) SSH con Entra / `runCommand` / Developer SKU / Arc**.
+14. **GH-84.14 — (Independiente) Modo de conexión "Direct" a IP privada** (VPN P2S, Entra Private Access, Tailscale/NetBird, jump host).
 
 ---
 
@@ -736,11 +886,287 @@ Recomendación por fase, en una línea:
 3. **Reutilización alta**: SSHKit, SFTPKit, TerminalUI, RDPBridge, el listener loopback y el
    transporte WebSocket ya existen; el trabajo nuevo es identidad Entra, descubrimiento ARM y
    un adaptador de transporte.
-4. **Riesgo acotado**: empezando por (b) `az` dependemos solo de APIs documentadas; (a) es una
-   mejora opcional.
+4. **Sin dependencias para el usuario**: con la Ruta 1 no hace falta instalar Azure CLI ni
+   hacer `az login`. Esa es la diferencia frente a la extensión de VS Code y frente a AzPin, y
+   la paridad con Reach. El costo es depender de un protocolo no documentado (R1), mitigado
+   con tests de contrato y el plan B.
 
 Qué **no** aportamos frente a la competencia: Entra RDP desde Mac (imposible por plataforma,
 §3.6) ni funcionamiento con Bastion Basic/Developer (limitación de SKU, §3.1).
+
+---
+
+## 9. Plan de implementación Swift (Ruta 1)
+
+Módulos nuevos: `AzureClient` (ARM) y `BastionKit` (túnel), más cambios acotados en `AuthKit`,
+`TunnelKit`, `ExplorerUI` y `App`. Todo con concurrencia estricta de Swift 6, como el resto del
+repo. Estos bocetos no son código de producción.
+
+### 9.1 AzureAuth (AuthKit)
+
+**App registration** (una vez, por el dueño o por cada organización; el repo no lleva client ID):
+
+1. Entra admin center → App registrations → New: *Accounts in any organizational directory (Multitenant)*.
+2. Authentication → *Mobile and desktop applications* → redirect `http://localhost`.
+   *Allow public client flows* = **Yes** (necesario para device code).
+3. API permissions → *Azure Service Management* → delegated `user_impersonation`.
+4. Sin certificados ni secretos (public client).
+5. Documentar la URL de **admin consent** para tenants con user consent deshabilitado:
+   `https://login.microsoftonline.com/{tenant}/adminconsent?client_id={id}`.
+   ⚠️ Endpoint de admin consent v1, a confirmar en F1.
+
+**Flujos**:
+
+| Flujo | Endpoint | Uso |
+|---|---|---|
+| Auth code + PKCE (S256), loopback | `GET https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize` → `POST …/organizations/oauth2/v2.0/token` (`grant_type=authorization_code`, `code_verifier`) | **Principal** |
+| Device code | `POST …/organizations/oauth2/v2.0/devicecode` → polling `POST …/token` con `grant_type=urn:ietf:params:oauth:grant-type:device_code` respetando `interval` | **Fallback** manual ("Iniciar sesión con código"). Si el error es de CA, mostrar "tu organización bloquea este método" |
+| Refresh por tenant | `POST https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token` (`grant_type=refresh_token`, `scope=https://management.core.windows.net//user_impersonation offline_access`) | Cada llamada ARM y Bastion; rota el refresh token |
+
+Scopes del login: `openid profile offline_access https://management.core.windows.net//user_impersonation`.
+
+```swift
+public struct EntraAuthorizer: Sendable {
+    public init(config: EntraClientConfig, loopback: LoopbackReceiver = .init(), launcher: LoginSession = .init())
+    public func signInInteractive() async throws -> EntraTokenResponse          // PKCE (reusa PKCE.swift)
+    public func signInWithDeviceCode(present: @Sendable (DeviceCodePrompt) async -> Void) async throws -> EntraTokenResponse
+    public func refresh(_ refreshToken: String, tenantID: String) async throws -> EntraTokenResponse
+}
+public struct DeviceCodePrompt: Sendable { public let userCode: String; public let verificationURI: URL; public let expiresIn: Int }
+```
+
+- `AzureCredentialFacade` (actor): caché `[tenantID: (token, expiry)]` en memoria; refresh
+  serializado por tenant (sin estampidas); persistencia `AzureOfflineCredential` en Keychain
+  `…profile.<id>.azure`; `Reauthorized` como `AsyncStream`, igual que `CredentialFacade`.
+- Mapeo de errores: `invalid_grant` / `interaction_required` → "requiere Sign In";
+  `consent_required` → mostrar la URL de admin consent; `AADSTS50076`/`53003` (MFA/CA) →
+  re‑login interactivo con `login_hint`.
+- Tests: `URLProtocol` stub para `/token` y `/devicecode` (pending → success, expired, declined),
+  rotación de refresh token, aislamiento de Keychain entre dos perfiles, `purge()` borra `.azure`.
+
+### 9.2 AzureARMClient (AzureClient)
+
+Endpoints exactos en §2. Comportamiento:
+
+```swift
+public struct AzureARMClient: Sendable {
+    public init(session: URLSession = .shared, token: @escaping @Sendable (_ tenantID: String) async throws -> String)
+    public func tenants() async throws -> [AzureTenant]                                  // /tenants 2022-12-01
+    public func subscriptions(tenantID: String) async throws -> [AzureSubscription]       // /subscriptions 2022-12-01
+    public func resourceGroups(_ sub: AzureSubscription) async throws -> [AzureResourceGroup]   // 2021-04-01
+    public func virtualMachines(_ sub: AzureSubscription) async throws -> [AzureVM]       // Compute 2026-04-01 (+ statusOnly)
+    public func networkInterface(id: String, tenantID: String) async throws -> AzureNIC    // Network 2026-01-01
+    public func bastionHosts(_ sub: AzureSubscription) async throws -> [AzureBastion]     // Network 2026-01-01
+    public func bastionHost(id: String, tenantID: String) async throws -> AzureBastion     // GET por id (equivale a `az network bastion show`)
+}
+```
+
+- Paginación: genérico `Page<T> { value: [T]; nextLink: URL? }`; seguir `nextLink` literal.
+- Throttling: ante `429` respetar `Retry-After`, con backoff acotado
+  ([request limits and throttling](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/request-limits-and-throttling)).
+- Concurrencia: `TaskGroup` por suscripción, con un máximo de 4 a la vez.
+- `AzureDiscovery` arma el árbol: tenants → subs (`state == Enabled`) → RGs → VMs, y para
+  cada VM: NIC (IP privada + VNet) y un Bastion candidato (misma VNet; si es peered, el usuario
+  lo elige y queda recordado en settings).
+- Tests: fixtures JSON copiados de los ejemplos de la REST reference, paginación de 3 páginas,
+  429 con `Retry-After`, sub `Disabled` omitida, VM sin NIC.
+
+### 9.3 BastionTunnel (BastionKit)
+
+Tres piezas, cada una testeable por separado:
+
+```swift
+/// Plano de datos del Bastion: POST/DELETE /api/tokens (tunnel.py L80‑114, L210‑230).
+public struct BastionSessionClient: Sendable {
+    public struct Session: Sendable, CustomStringConvertible {   // description redacta tokens
+        public let authToken: String, nodeID: String, websocketToken: String
+    }
+    public init(session: URLSession = .shared)
+    /// form-urlencoded: resourceId, protocol=tcptunnel, workloadHostPort, aztoken[, token][, hostname]
+    public func open(dnsName: String, vmResourceID: String, port: UInt16, armToken: String,
+                     previous: Session?, hostname: String? = nil) async throws(BastionTunnelError) -> Session
+    /// DELETE /api/tokens/{authToken} + X-Node-Id; 404 = OK.
+    public func close(dnsName: String, _ session: Session) async
+}
+
+/// Un túnel = un WebSocket = una conexión TCP lógica. Conforma SshByteStream (SSH/SFTP in-process).
+public actor BastionTunnelStream: SshByteStream {
+    /// URL: wss://{dnsName}/webtunnelv2/{websocketToken}?X-Node-Id={nodeId}
+    /// Headers: Origin: https://{dnsName}. SIN Sec-WebSocket-Protocol, SIN Authorization.
+    public static func open(_ target: BastionTarget, session: BastionSessionClient.Session,
+                            opener: any RelayChannelOpening) async throws -> BastionTunnelStream
+    public func write(_ bytes: Data) async throws      // trocea en frames binarios de ≤ 4096 B (paridad con el CLI)
+    public func read() async throws -> Data?           // nil = EOF (Close frame)
+    public func close() async                           // Close 1000
+}
+
+/// Puerto local 127.0.0.1:0 (NWListener, reusa IapListener). Por conexión: POST (encadenando
+/// token/X-Node-Id) + BastionTunnelStream + bombeo bidireccional. DELETE al cerrarse la última.
+public actor BastionLocalForwarder {
+    public static func start(target: BastionTarget, sessions: BastionSessionClient,
+                             armToken: @escaping @Sendable () async throws -> String,
+                             opener: any RelayChannelOpening) async throws -> BastionLocalForwarder
+    public nonisolated var port: UInt16 { get }
+    public func stop() async
+}
+```
+
+Cambio necesario en TunnelKit: `NIOWebSocketTransport` hoy fija `Authorization` + subprotocolo
+IAP (`WebSocketTransport.swift` L88‑90). Hay que parametrizarlo con un
+`HandshakeProfile { headers: HTTPHeaders; subprotocol: String? }` (`.iap(token)` y
+`.bastion(dnsName)`), sin cambiar el comportamiento de IAP.
+
+Puente bidireccional (forwarder y pruebas):
+
+```swift
+// Por conexión NWConnection aceptada:
+async let up: Void = { while let chunk = await tcp.receive(max: 4096) { try await ws.write(chunk) }; await ws.close() }()
+async let down: Void = { while let data = try await ws.read() { try await tcp.send(data) }; tcp.cancel() }()
+_ = try? await (up, down)
+// active -= 1; if active == 0 { await sessions.close(dnsName, lastSession) }
+```
+
+Mapeo de errores (`BastionTunnelError`):
+
+| Situación | Error | Mensaje UI |
+|---|---|---|
+| SKU ≠ Standard/Premium o `enableTunneling == false` (chequeo previo con datos ARM) | `.nativeClientDisabled(sku:)` | "Bastion {sku} sin Native Client: requiere Standard/Premium con Native Client Support" |
+| POST 401/403 | `.unauthorized(message)` | "Sin permiso: Reader en VM, NIC y Bastion" (+ `message` del servidor) |
+| POST 404 / `message` de recurso | `.targetNotFound` | "VM no encontrada por el Bastion" |
+| POST 200 sin `authToken`/`nodeId`/`websocketToken`, o cuerpo no‑JSON | `.protocolChanged(status:)` | "Bastion cambió su protocolo; actualiza la app" |
+| Upgrade WS ≠ 101 | `.protocolChanged(status:)` o `.unauthorized` si 401/403 | ídem |
+| Frame de texto recibido | `.protocolChanged(status: 0)` | ídem |
+| Close anómalo a mitad de sesión | `.connectionLost(code:)` | "Conexión con Bastion perdida" (reabrir la pestaña) |
+
+Seguridad: `aztoken`, `authToken` y `websocketToken` nunca aparecen en `description`, logs ni
+errores (mismo criterio que `SshConnector`). Las URLs del WS no se registran.
+
+### 9.4 AzureProfileSession + UI (App, ExplorerUI)
+
+- `ProfileCoordinator.activate` crea `AzureProfileSession` cuando
+  `descriptor.provider == .azure`. "Nuevo perfil…" pregunta Google Cloud / Microsoft Azure.
+- `AzureProfileSession` (análogo a `ProfileSession`, sobre `ProfileSessionHosting`):
+  - `openWindow()`: `ExplorerWindowController(dataSourceLabel: "Azure")`.
+  - Sign In: ventana de login con "Continuar con el navegador" (PKCE) y "Usar código" (device code).
+  - Carga: `AzureDiscovery`, luego `viewModel` con los nodos Azure (§5.4).
+  - **Connect SSH** (Linux): `BastionTunnelStream`, luego `SshSession.connect(over:)` con
+    llave/usuario de la VM (Keychain del perfil) y host key TOFU. Pestaña de terminal existente.
+  - **Browse files**: SFTP sobre otro `BastionTunnelStream` (un WS por canal lógico, como el CLI).
+  - **Connect RDP** (Windows): `BastionLocalForwarder` en `127.0.0.1:<port>`, luego
+    `RdpFallbackConnector` (`.rdp` + Windows App) con credenciales locales/dominio. Si la VM
+    tiene `AADLoginForWindows`, avisar de la limitación de Entra (§3.6).
+  - `teardown()`: cierra pestañas, `stop()` de los forwarders y `DELETE` de las sesiones.
+- Properties de una VM: SKU del Bastion, `enableTunneling`, IP privada, power state, RG, suscripción, tenant.
+
+### 9.5 Pruebas
+
+**Unitarias (CI, sin red).** Patrón de `specs/tunnel/mock-server.md`:
+
+1. `BastionSessionClient` con `URLProtocol` stub:
+   - el cuerpo es form-urlencoded con exactamente `resourceId`, `protocol=tcptunnel`,
+     `workloadHostPort`, `aztoken`;
+   - sin `token` ni `X-Node-Id` en la primera llamada y con ambos en la segunda;
+   - parseo de `{authToken,nodeId,websocketToken}`, error con `message` y cuerpo no‑JSON (`.protocolChanged`);
+   - `DELETE` con `X-Node-Id`; 404 tolerado.
+2. **Servidor WebSocket falso** (NIO `NIOWebSocketServerUpgrader` en `127.0.0.1:0`, TLS con
+   certificado de test o `ws://` inyectado en tests). Verifica:
+   - path `/webtunnelv2/{token}` y query `X-Node-Id`;
+   - **ausencia** de `Sec-WebSocket-Protocol` y `Authorization`; `Origin` correcto;
+   - eco binario de 1 B, 4096 B, 4097 B (troceo) y 1 MiB;
+   - frame de texto → `.protocolChanged`;
+   - Close 1000 del servidor → EOF limpio; corte abrupto → `.connectionLost`.
+3. `BastionLocalForwarder` con servidor falso:
+   - dos conexiones locales concurrentes → dos POST encadenados y dos WS;
+   - **un solo** `DELETE`, al cerrarse la última;
+   - rechaza clientes no loopback (`IapListener.isClientAllowed`).
+4. SSH de extremo a extremo **en proceso**: el servidor WS falso reenvía a un servidor SSH de test
+   (el que ya usan los tests de SSHKit) → `SshSession.connect(over: BastionTunnelStream)`
+   ejecuta `echo ok`.
+5. Redacción: `String(describing:)` de sesiones y errores no contiene los tokens.
+
+**e2e contra Bastion real (manual / pre‑release, no en CI pública).** Se ejecutan con
+`AZURE_E2E_TENANT`, `AZURE_E2E_VM_LINUX_ID`, `AZURE_E2E_VM_WINDOWS_ID`, `AZURE_E2E_BASTION_ID`
+y una cuenta de prueba con solo Reader + login local en las VMs:
+
+| Caso | Pasa si |
+|---|---|
+| E1 SSH | Banner `SSH-2.0-` recibido y `uname -a` devuelve salida en < 10 s desde Connect |
+| E2 SFTP | Subir y bajar 10 MiB con hash SHA‑256 idéntico |
+| E3 RDP | Windows App abre sesión a `127.0.0.1:<port>` con usuario local |
+| E4 Concurrencia | 2 pestañas SSH a la misma VM y 1 a otra, simultáneas, 10 min sin cortes |
+| E5 Sesión larga | Pestaña SSH 75 min (> vida del access token) sin corte, o corte detectado con mensaje claro |
+| E6 Limpieza | Tras cerrar todo, un `DELETE` extra devuelve 404 (sesión ya borrada) |
+| E7 RBAC | Con una cuenta sin Reader en la NIC → `.unauthorized` con mensaje |
+| E8 SKU | Bastion Basic → `.nativeClientDisabled`, sin llamar a `/api/tokens` |
+
+### 9.6 Fases, esfuerzo, riesgos y criterios de aceptación verificables
+
+| Fase | Esfuerzo | Riesgos principales | Criterios de aceptación (todos verificables) |
+|---|---|---|---|
+| **F0 Spike** | 2–3 d + ≈ $1 | R2, R1, R10 | **A0.1** token de **nuestra** app registration aceptado por `POST /api/tokens` (200 + 3 campos). **A0.2** `ssh -p <port> user@127.0.0.1` funciona vía el listener del spike. **A0.3** Windows App abre RDP por el puerto del spike. **A0.4** `DELETE` devuelve 200/204 y un segundo devuelve 404. **A0.5** registrado el comportamiento a > 60 min y con `--resource-port` custom. **A0.6** capturados (redactados) request/response reales y guardados en `specs/azure/f0-findings.md`. |
+| **F1 Auth + ARM + árbol** | 7–10 d | R4, R5, R7, R8 | **A1.1** login PKCE con cuenta de 2 tenants muestra ambos tenants y sus suscripciones. **A1.2** device code funciona en tenant sin CA y da mensaje específico en tenant con CA. **A1.3** dos perfiles Azure abiertos a la vez no comparten tokens (test de Keychain + manual). **A1.4** eliminar perfil borra `…profile.<id>.azure` (test). **A1.5** árbol completo de una sub con > 100 VMs (paginación) en < 15 s. **A1.6** cada VM muestra Bastion asociado o el motivo de no tenerlo. **A1.7** `swift build` + `swift test` en verde y sin regresiones GCP. |
+| **F2 BastionTunnel + conexión** | 7–9 d | R1, R9 | **A2.1** tests unitarios §9.5 (1‑5) en verde en CI. **A2.2** e2e E1, E2, E3, E6, E7 y E8 pasan. **A2.3** ningún token en logs (`log show --predicate 'subsystem == "com.iapdesktop.mac"'` tras una sesión, grep vacío). **A2.4** cerrar la ventana del perfil cierra túneles y hace `DELETE` (E6). **A2.5** IAP/GCP sin cambios de comportamiento (tests TunnelKit existentes en verde). |
+| **F3 Endurecimiento** | 3–4 d | R1, R10 | **A3.1** E4 y E5 pasan. **A3.2** túnel funciona detrás de proxy HTTP CONNECT (test con proxy local). **A3.3** checklist e2e documentado en `docs/usage.md` §13 y ejecutado antes de la release. **A3.4** error `protocolChanged` probado inyectando una respuesta alterada en el servidor falso. |
+
+---
+
+## 10. Comandos `az` de referencia y equivalencia Swift → `az`
+
+Comandos usados como referencia (parámetros exactos de `EXT/_params.py` L25‑50 y de la doc ✅):
+
+```bash
+# Identidad / tokens
+az login --tenant <tenantId>                                       # equivale a EntraAuthorizer.signInInteractive
+az login --use-device-code                                         # equivale a signInWithDeviceCode
+az account get-access-token --resource https://management.core.windows.net/ --tenant <tenantId>
+az account tenant list
+az account list --all
+
+# Descubrimiento
+az group list --subscription <subId>
+az vm list --subscription <subId> --show-details                   # powerState + privateIps
+az network nic show --ids <nicId>
+az network bastion list --subscription <subId>
+az network bastion show --name <bastion> --resource-group <rg>     # GET bastionHosts api-version 2024-01-01 (aaz)
+
+# Túnel (el que reimplementamos)
+az network bastion tunnel --name <bastion> --resource-group <rg> \
+  --target-resource-id <vmResourceId> --resource-port <22|3389|n> --port <localPort> [--timeout <s>]
+az network bastion tunnel --name <bastion> --resource-group <rg> \
+  --target-ip-address <ip> --resource-port <22|3389> --port <localPort>          # IP-connect (Standard+, enableIpConnect)
+
+# Clientes sobre el túnel
+ssh <user>@127.0.0.1 -p <localPort>
+scp -P <localPort> <archivo> <user>@127.0.0.1:<ruta>
+
+# Referencia (no reimplementados)
+az network bastion ssh --name <bastion> --resource-group <rg> --target-resource-id <vmId> \
+  --auth-type <password|ssh-key|AAD> [--username <u>] [--ssh-key <path>] [--resource-port <n>] [-- <ssh args>]
+az network bastion rdp --name <bastion> --resource-group <rg> --target-resource-id <vmId> [--enable-mfa]   # solo Windows
+az vm run-command invoke --resource-group <rg> --name <vm> --command-id RunShellScript --scripts "<cmd>"
+```
+
+| Swift (propuesto) | `az` equivalente | HTTP subyacente | Fuente |
+|---|---|---|---|
+| `EntraAuthorizer.signInInteractive()` | `az login` | `GET /organizations/oauth2/v2.0/authorize` + `POST …/token` (PKCE) | ✅ auth code flow |
+| `EntraAuthorizer.signInWithDeviceCode()` | `az login --use-device-code` | `POST …/devicecode` + polling `…/token` | ✅ device code |
+| `AzureCredentialFacade.accessToken(tenantID:)` | `az account get-access-token --resource https://management.core.windows.net/ --tenant <id>` | `POST /{tenant}/oauth2/v2.0/token` (refresh) | 🔍 `CORE/_profile.py` L379‑388 |
+| `AzureARMClient.tenants()` | `az account tenant list` | `GET /tenants?api-version=2022-12-01` | ✅ |
+| `AzureARMClient.subscriptions(tenantID:)` | `az account list --all` | `GET /subscriptions?api-version=2022-12-01` | ✅ |
+| `AzureARMClient.resourceGroups(_:)` | `az group list --subscription` | `GET …/resourcegroups?api-version=2021-04-01` | ✅ |
+| `AzureARMClient.virtualMachines(_:)` | `az vm list --show-details` | `GET …/Microsoft.Compute/virtualMachines?api-version=2026-04-01` (+ instanceView) | ✅ |
+| `AzureARMClient.networkInterface(id:)` | `az network nic show --ids` | `GET …/networkInterfaces/{nic}?api-version=2026-01-01` | ✅ |
+| `AzureARMClient.bastionHosts(_:)` | `az network bastion list` | `GET …/Microsoft.Network/bastionHosts?api-version=2026-01-01` | ✅ |
+| `AzureARMClient.bastionHost(id:)` | `az network bastion show` | `GET …/bastionHosts/{name}?api-version=2024-01-01` (CLI) / `2026-01-01` (nosotros) | 🔍 `_show.py` L124 |
+| `BastionTarget.supportsNativeClient` | gate en `create_bastion_tunnel` | — (datos ARM) | 🔍 `custom.py` L461‑463 |
+| `BastionSessionClient.open(...)` | `TunnelServer._get_auth_token()` | `POST https://{dnsName}/api/tokens` (form) | 🔍 `tunnel.py` L80‑114 |
+| `BastionTunnelStream.open(...)` | `create_connection(wss://…/webtunnelv2/…)` | WS upgrade sin subprotocolo | 🔍 `tunnel.py` L136‑142 |
+| `BastionTunnelStream.write/read` | `_listen_to_client` / `_listen_to_web_socket` | frames binarios ≤ 4096 B / tal cual | 🔍 `tunnel.py` L163‑205 |
+| `BastionLocalForwarder.start(...)` | `TunnelServer.__init__` + `_listen` (`--port`, 0 = auto) | `bind 127.0.0.1:<port>` | 🔍 `tunnel.py` L41‑66, L116‑127 |
+| `BastionSessionClient.close(...)` / `BastionLocalForwarder.stop()` | `TunnelServer.cleanup()` (Ctrl+C) | `DELETE https://{dnsName}/api/tokens/{authToken}` | 🔍 `tunnel.py` L210‑230 |
+| `SshSession.connect(over: BastionTunnelStream)` | `ssh user@127.0.0.1 -p <port>` | SSH sobre el WS | — |
+| `SFTPKit` sobre `BastionTunnelStream` | `scp -P <port> …` | SFTP sobre SSH sobre el WS | ✅ file transfer native |
+| `RdpFallbackConnector` → `127.0.0.1:<port>` | `az network bastion tunnel … --resource-port 3389` + cliente RDP | RDP sobre el WS | ✅ native client (tunnel) |
 
 ---
 
@@ -768,7 +1194,15 @@ Qué **no** aportamos frente a la competencia: Entra RDP desde Mac (imposible po
   [quickstart / Developer](https://learn.microsoft.com/en-us/azure/bastion/quickstart-host-portal) ·
   [pricing](https://azure.microsoft.com/en-us/pricing/details/azure-bastion/) ·
   [Retail Prices API](https://prices.azure.com/api/retail/prices)
-- Código CLI (MIT): [bastion/tunnel.py](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/tunnel.py) ·
+- Código CLI, permalinks a los commits leídos:
+  [tunnel.py@3fcfaeb](https://github.com/Azure/azure-cli-extensions/blob/3fcfaeb4374d57bbe54b087d7dd35af41a528f85/src/bastion/azext_bastion/tunnel.py) ·
+  [custom.py@3fcfaeb](https://github.com/Azure/azure-cli-extensions/blob/3fcfaeb4374d57bbe54b087d7dd35af41a528f85/src/bastion/azext_bastion/custom.py) ·
+  [_params.py@3fcfaeb](https://github.com/Azure/azure-cli-extensions/blob/3fcfaeb4374d57bbe54b087d7dd35af41a528f85/src/bastion/azext_bastion/_params.py) ·
+  [aaz _show.py@3fcfaeb](https://github.com/Azure/azure-cli-extensions/blob/3fcfaeb4374d57bbe54b087d7dd35af41a528f85/src/bastion/azext_bastion/aaz/latest/network/bastion/_show.py) ·
+  [_profile.py@fa8fb56](https://github.com/Azure/azure-cli/blob/fa8fb564d07b533849f999f061d5102f4644a232/src/azure-cli-core/azure/cli/core/_profile.py) ·
+  [websocket-client 1.8.0 _handshake.py](https://github.com/websocket-client/websocket-client/blob/v1.8.0/websocket/_handshake.py) ·
+  [requests 2.32.3 models.py](https://github.com/psf/requests/blob/v2.32.3/src/requests/models.py)
+- Código CLI (MIT, rama main): [bastion/tunnel.py](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/tunnel.py) ·
   [bastion/custom.py](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/custom.py) ·
   [developer_sku_helper.py](https://github.com/Azure/azure-cli-extensions/blob/main/src/bastion/azext_bastion/developer_sku_helper.py) ·
   [azure-cli-core auth/util.py](https://github.com/Azure/azure-cli/blob/dev/src/azure-cli-core/azure/cli/core/auth/util.py)
