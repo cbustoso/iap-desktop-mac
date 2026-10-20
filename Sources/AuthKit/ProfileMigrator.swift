@@ -84,6 +84,7 @@ public struct ProfileMigrator: @unchecked Sendable {
             try store.upsert(ProfileDescriptor(
                 id: .legacyDefault,
                 displayName: store.descriptor(for: .legacyDefault)?.displayName ?? "Perfil principal",
+                provider: .google,  // el estado de perfil único siempre fue Google
                 issuer: account?.issuer,
                 redactedAccount: account.map { ProfileDescriptor.redactedAccount(issuer: $0.issuer, account: $0.email) },
                 lastUsedAt: account == nil ? nil : now))
