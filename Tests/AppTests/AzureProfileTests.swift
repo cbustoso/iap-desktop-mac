@@ -8,15 +8,15 @@ import Testing
 // GH-91: sesión de perfil Azure ligada a la sesión `az login`. `az` es un
 // runner falso en memoria (nunca el `az` real) y ARM un `URLProtocol` (sin red).
 
-private let home = "aaaaaaaa-0000-0000-0000-000000000001"
-private let guest = "bbbbbbbb-0000-0000-0000-000000000002"
-private let oid = "11111111-2222-3333-4444-555555555555"
+let home = "aaaaaaaa-0000-0000-0000-000000000001"
+let guest = "bbbbbbbb-0000-0000-0000-000000000002"
+let oid = "11111111-2222-3333-4444-555555555555"
 private let subA = "5ub00000-0000-0000-0000-00000000000a"
 private let subB = "5ub00000-0000-0000-0000-00000000000b"
 private let subGuest = "5ub00000-0000-0000-0000-00000000000c"
 
 /// JWT sin firma con los claims que lee `AzureAccountIdentity`.
-private func jwt(tenant: String, objectID: String = oid, upn: String = "ada@contoso.com") -> String {
+func jwt(tenant: String, objectID: String = oid, upn: String = "ada@contoso.com") -> String {
     func encode(_ object: [String: String]) -> String {
         let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
         return data.base64EncodedString()
@@ -26,7 +26,7 @@ private func jwt(tenant: String, objectID: String = oid, upn: String = "ada@cont
     return "\(encode(["alg": "none"])).\(encode(["tid": tenant, "oid": objectID, "upn": upn])).sig"
 }
 
-private func account(_ id: String, tenant: String, name: String, isDefault: Bool = false) -> String {
+func account(_ id: String, tenant: String, name: String, isDefault: Bool = false) -> String {
     """
     {"id":"\(id)","name":"\(name)","state":"Enabled","tenantId":"\(tenant)","homeTenantId":"\(tenant)",\
     "isDefault":\(isDefault),"user":{"name":"ada@contoso.com","type":"user"}}
@@ -34,7 +34,7 @@ private func account(_ id: String, tenant: String, name: String, isDefault: Bool
 }
 
 /// `az` falso: responde según los argumentos y registra cada llamada.
-private final class StubAz: AzCommandRunning, @unchecked Sendable {
+final class StubAz: AzCommandRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var installed: Bool
     private var accountList: String
@@ -83,9 +83,10 @@ private final class StubAz: AzCommandRunning, @unchecked Sendable {
 }
 
 /// ARM falso por sesión (cabecera `X-Stub-ID`).
-private final class ARMStub: URLProtocol, @unchecked Sendable {
+final class ARMStub: URLProtocol, @unchecked Sendable {
     struct Request: Sendable {
         let path: String
+        var query: String? = nil
         let authorization: String?
     }
 
@@ -109,7 +110,7 @@ private final class ARMStub: URLProtocol, @unchecked Sendable {
     override func startLoading() {
         let url = request.url!
         let id = request.value(forHTTPHeaderField: "X-Stub-ID") ?? ""
-        let entry = Request(path: url.path, authorization: request.value(forHTTPHeaderField: "Authorization"))
+        let entry = Request(path: url.path, query: url.query, authorization: request.value(forHTTPHeaderField: "Authorization"))
         let handler = Self.lock.withLock { () -> Handler? in
             Self.seen[id, default: []].append(entry)
             return Self.handlers[id]
@@ -124,7 +125,7 @@ private final class ARMStub: URLProtocol, @unchecked Sendable {
     override func stopLoading() {}
 }
 
-private func page(_ items: [String]) -> String { #"{"value":[\#(items.joined(separator: ","))]}"# }
+func page(_ items: [String]) -> String { #"{"value":[\#(items.joined(separator: ","))]}"# }
 
 private func subscriptionJSON(_ id: String, tenant: String, name: String, state: String = "Enabled") -> String {
     #"{"subscriptionId":"\#(id)","tenantId":"\#(tenant)","displayName":"\#(name)","state":"\#(state)"}"#
@@ -158,7 +159,7 @@ private func standardARM(guestStatus: Int = 200) -> (URLSession, @Sendable () ->
 private let twoTenantAccounts = "[\(account(subA, tenant: home, name: "Dev")),\(account(subB, tenant: home, name: "Prod", isDefault: true)),\(account(guest, tenant: guest, name: "N/A(tenant level account)"))]"
 
 /// Suite `explorer` propia por test (y su limpieza).
-private final class TestDefaults: @unchecked Sendable {
+final class TestDefaults: @unchecked Sendable {
     let name = "iap.tests.azure.\(UUID().uuidString)"
     let defaults: UserDefaults
     init() { defaults = UserDefaults(suiteName: name)! }

@@ -191,9 +191,12 @@ public final class ExplorerViewModel {
         return AzureExplorerSnapshot(account: snapshot.account, tenants: tenants)
     }
 
+    /// El adaptador puede traer su propia acción (`recoverySuggestion`: p. ej.
+    /// pedir Reader en la suscripción); si no, la de la sesión `az`.
     private static func azureErrorMessage(_ error: any Error) -> String {
-        "No se pudo cargar Azure: \(error.localizedDescription). "
-            + "Instala Azure CLI y ejecuta `az login`, y vuelve a intentarlo."
+        let action = (error as? any LocalizedError)?.recoverySuggestion
+            ?? "Instala Azure CLI y ejecuta `az login`, y vuelve a intentarlo."
+        return "No se pudo cargar Azure: \(error.localizedDescription). \(action)"
     }
 
     /// Replaces the current snapshot only after a complete successful load.

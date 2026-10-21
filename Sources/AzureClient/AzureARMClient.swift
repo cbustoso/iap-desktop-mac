@@ -81,6 +81,14 @@ public struct AzureARMClient: Sendable {
                        apiVersion: APIVersion.compute, tenantID: tenantID)
     }
 
+    /// Estado de encendido de todas las VMs de la suscripción (`statusOnly=true`:
+    /// una sola llamada paginada con el `instanceView` de cada VM).
+    public func virtualMachineStatuses(subscriptionID: String, tenantID: String) async throws -> [AzureVMStatus] {
+        try await list("\(try Self.subscriptionPath(subscriptionID))/providers/Microsoft.Compute/virtualMachines",
+                       apiVersion: APIVersion.compute, tenantID: tenantID,
+                       query: [URLQueryItem(name: "statusOnly", value: "true")])
+    }
+
     /// Todas las NICs de la suscripción (IP privada + subnet de cada VM).
     public func networkInterfaces(subscriptionID: String, tenantID: String) async throws -> [AzureNIC] {
         try await list("\(try Self.subscriptionPath(subscriptionID))/providers/Microsoft.Network/networkInterfaces",
@@ -109,8 +117,8 @@ public struct AzureARMClient: Sendable {
 
     /// Sigue `nextLink` tal cual (ya trae `api-version` y `$skiptoken`) mientras
     /// apunte al mismo endpoint ARM.
-    func list<T: Decodable>(_ path: String, apiVersion: String, tenantID: String) async throws -> [T] {
-        var next: URL? = url(path: path, apiVersion: apiVersion)
+    func list<T: Decodable>(_ path: String, apiVersion: String, tenantID: String, query: [URLQueryItem] = []) async throws -> [T] {
+        var next: URL? = url(path: path, apiVersion: apiVersion, query: query)
         var items: [T] = []
         var seen = Set<String>()
         var pages = 0
@@ -131,10 +139,10 @@ public struct AzureARMClient: Sendable {
         return url
     }
 
-    private func url(path: String, apiVersion: String) -> URL {
+    private func url(path: String, apiVersion: String, query: [URLQueryItem] = []) -> URL {
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)!
         components.path = path
-        components.queryItems = [URLQueryItem(name: "api-version", value: apiVersion)]
+        components.queryItems = [URLQueryItem(name: "api-version", value: apiVersion)] + query
         return components.url!
     }
 

@@ -1,6 +1,7 @@
 import AppKit
 import AuthKit
 import AzureClient
+import ExplorerUI
 import Foundation
 import OSLog
 
@@ -9,6 +10,11 @@ import OSLog
 /// Google, pero sin login propio: detecta `az` al abrir la ventana y, si
 /// falta o no hay sesión, queda en `requiresSignIn` con el CTA. Ningún token
 /// sale de memoria; el descriptor guarda solo tenant, `oid` y UPN enmascarado.
+///
+/// GH-98: la ventana principal es el Explorer (árbol tenant → suscripción →
+/// RG → VM → Bastion) con `AzureExplorerDataSourceLive`, uno por conexión. La
+/// ventana Cuenta Azure (`AzureProfileWindowController`) queda como auxiliar:
+/// CTA de `az login` y elección del tenant/suscripción que muestra el árbol.
 @MainActor
 final class AzureProfileSession: NSObject, ProfileSessionHosting {
     /// Lo que se inyecta en tests: `az` (runner falso) y ARM (`URLProtocol`).
@@ -26,14 +32,28 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
     let provider = CloudProvider.azure
     private(set) var descriptor: ProfileDescriptor
     let model: AzureAccountModel
+    let explorerViewModel: ExplorerViewModel
     private let dependencies: Dependencies
+    private let bastionChoices: AzureBastionChoiceStore
+    /// Data source del árbol y la conexión (`model.generation`) para la que se creó.
+    private(set) var explorerDataSource: AzureExplorerDataSourceLive?
+    private var explorerGeneration: Int?
+    private var explorerScope: AzureSelection?
+    /// La ventana Cuenta Azure ya se abrió para este "falta az login" (los
+    /// reintentos al volver a la app no le roban el foco cada vez).
+    private var promptedForAzLogin = false
+    /// Última carga del árbol (los tests la esperan).
+    private(set) var explorerLoad: Task<Void, Never>?
 
     /// El coordinador fija (o, con `nil`, libera) la cuenta en el índice de perfiles.
     var onAccountChanged: (@MainActor (AzureProfileSession, AzureAccountIdentity?) -> Void)?
     var onWindowClosed: (@MainActor (any ProfileSessionHosting) -> Void)?
     var showsProfileName: @MainActor () -> Bool = { false }
 
+    /// Ventana Cuenta Azure (auxiliar).
     private(set) var windowController: AzureProfileWindowController?
+    /// Ventana principal del perfil.
+    private(set) var explorerController: ExplorerWindowController?
     private var windowCloseGuard: WindowCloseGuard?
     private var activationObserver: (any NSObjectProtocol)?
     private(set) var connectTask: Task<Void, Never>?
@@ -47,6 +67,10 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
         self.descriptor = descriptor
         self.environment = environment
         self.dependencies = dependencies
+        bastionChoices = AzureBastionChoiceStore(defaults: explorerDefaults)
+        // Sin sesión hasta que `az` responda: el árbol muestra el CTA, nunca datos de ejemplo.
+        explorerViewModel = ExplorerViewModel(
+            isSignedIn: false, azureAccount: AzureExplorerAccount(id: id.rawValue, displayName: descriptor.displayName))
         let armSession = dependencies.armSession
         model = AzureAccountModel(
             source: AzCliTokenSource(runner: dependencies.runner),
@@ -64,19 +88,20 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
         }
     }
 
-    var window: NSWindow? { windowController?.window }
+    var window: NSWindow? { explorerController?.window }
     var loginWindow: NSWindow? { nil }
     /// Sin pestañas hasta #94 (túnel Bastion).
     var hasOpenTabs: Bool { false }
 
     func owns(_ window: NSWindow?) -> Bool {
         guard let window else { return false }
-        return window === windowController?.window
+        return window === explorerController?.window || window === windowController?.window
     }
 
     func update(_ descriptor: ProfileDescriptor) {
         self.descriptor = descriptor
         window?.title = windowTitle
+        windowController?.window?.title = "Cuenta Azure — \(descriptor.displayName)"
         refreshAccount()
     }
 
@@ -84,23 +109,32 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
 
     // MARK: - Ventana
 
-    /// Crea la ventana y detecta `az` en el acto (arranque o alta del perfil).
+    /// Crea las ventanas y detecta `az` en el acto (arranque o alta del perfil).
     func openWindow() {
         let controller = AzureProfileWindowController(model: model)
         windowController = controller
-        controller.window?.title = windowTitle
+        controller.window?.title = "Cuenta Azure — \(descriptor.displayName)"
         controller.onRetry = { [weak self] in self?.reconnect() }
+
+        let explorer = ExplorerWindowController(viewModel: explorerViewModel, dataSourceLabel: "Azure")
+        explorerController = explorer
+        explorer.window?.title = windowTitle
+        explorer.onSignInRequest = { [weak self] in self?.showLoginWindow(nil) }
+        wireRefreshAction(explorer)
+
         model.onChange = { [weak self] in
             self?.windowController?.reload()
+            self?.syncExplorer()
             self?.refreshAccount()
         }
+        // Cerrar la ventana Cuenta Azure solo la oculta; cerrar el Explorer cierra el perfil.
         let closeGuard = WindowCloseGuard(shouldClose: { _ in true }, willClose: { [weak self] in
             guard let self else { return }
             self.onWindowClosed?(self)
         })
         windowCloseGuard = closeGuard
-        controller.window?.delegate = closeGuard
-        if dependencies.showsWindow { controller.showWindow(nil) }
+        explorer.window?.delegate = closeGuard
+        if dependencies.showsWindow { explorer.showWindow(nil) }
         refreshAccount()
         // Tras `az login` en Terminal, volver a la app reintenta solo.
         activationObserver = NotificationCenter.default.addObserver(
@@ -113,8 +147,15 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
 
     func bringToFront() {
         guard dependencies.showsWindow else { return }
-        windowController?.showWindow(nil)
+        explorerController?.showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Ventana Cuenta Azure al frente (CTA de `az login` o elegir suscripción).
+    func showAccountWindow() {
+        guard dependencies.showsWindow else { return }
+        windowController?.showWindow(nil)
+        windowController?.window?.makeKeyAndOrderFront(nil)
     }
 
     func teardown() async {
@@ -122,7 +163,84 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
         activationObserver = nil
         connectTask?.cancel()
         connectTask = nil
+        windowController?.window?.close()
+        endExplorerSession()
         await model.close()
+    }
+
+    // MARK: - Explorer (GH-98)
+
+    /// Estado de la sesión `az` → árbol. Cada conexión lista (`ready`) trae su
+    /// propio data source; sin `az`/sesión el árbol queda en "Sin sesión Azure"
+    /// con el CTA y se abre la ventana Cuenta Azure con los comandos.
+    private func syncExplorer() {
+        switch model.state {
+        case .ready(let identity, _):
+            promptedForAzLogin = false
+            if explorerGeneration != model.generation {
+                startExplorerSession(identity)
+            } else if explorerScope != model.selection, let source = explorerDataSource {
+                // Otro tenant/suscripción activos: misma caché, otro ámbito.
+                let scope = model.selection
+                explorerScope = scope
+                reloadExplorer { await source.setScope(scope) }
+            }
+        case .requiresSignIn:
+            endExplorerSession()
+            if !promptedForAzLogin {
+                promptedForAzLogin = true
+                showAccountWindow()
+            }
+        case .signedOut, .idle:
+            endExplorerSession()
+        case .detecting, .loading:
+            break  // se mantiene el árbol anterior hasta que la nueva conexión esté lista
+        }
+    }
+
+    private func startExplorerSession(_ identity: AzureAccountIdentity) {
+        guard let token = model.accessToken else { return }
+        let accounts = model.accounts
+        let arm = AzureARMClient(session: dependencies.armSession, token: token)
+        let source = AzureExplorerDataSourceLive(
+            homeTenantID: identity.tenantID,
+            directory: AzCliAccountDirectory(arm: arm, accounts: { accounts }),
+            arm: arm, choices: bastionChoices, scope: model.selection)
+        explorerDataSource = source
+        explorerGeneration = model.generation
+        explorerScope = model.selection
+        let username = ProfileDescriptor.redactedAccount(azureUsername: identity.username)
+        explorerViewModel.azureSessionStarted(
+            account: AzureExplorerAccount(
+                id: id.rawValue, displayName: username, username: username),
+            dataSource: source)
+        reloadExplorer()
+    }
+
+    private func endExplorerSession() {
+        explorerDataSource = nil
+        explorerGeneration = nil
+        explorerScope = nil
+        if explorerViewModel.azureState != .noSession { explorerViewModel.azureSessionEnded() }
+    }
+
+    /// Cargas en serie: un cambio de ámbito espera a la anterior. Un resultado
+    /// de una sesión ya terminada lo descarta el propio ViewModel (generación).
+    private func reloadExplorer(before: (@Sendable () async -> Void)? = nil) {
+        let previous = explorerLoad
+        explorerLoad = Task { @MainActor [explorerViewModel] in
+            await previous?.value
+            await before?()
+            await explorerViewModel.reloadAzure()
+        }
+    }
+
+    /// Refresh del toolbar = Refresh del menú: vuelve a leer la sesión `az`.
+    private func wireRefreshAction(_ explorer: ExplorerWindowController) {
+        let refreshID = NSToolbarItem.Identifier("iap.refresh")
+        guard let item = explorer.window?.toolbar?.items.first(where: { $0.itemIdentifier == refreshID }) else { return }
+        item.target = self
+        item.action = #selector(refreshProfileExplorer(_:))
     }
 
     /// Repite la detección y la carga (Reintentar, Refresh, Sign In).
@@ -145,13 +263,14 @@ final class AzureProfileSession: NSObject, ProfileSessionHosting {
             ?? (model.state.requiresSignIn || model.state == .signedOut ? "sin sesión az" : descriptor.redactedAccount)
         let text = showsProfileName() ? "\(descriptor.displayName) · \(account ?? "sin sesión az")" : account
         windowController?.showAccount(text)
+        explorerController?.showAccount(email: text)
     }
 
     // MARK: - Acciones de menú
 
-    /// Sin ventana Sign In propia: trae la ventana al frente y reintenta `az`.
+    /// Sin ventana Sign In propia: trae la ventana Cuenta Azure y reintenta `az`.
     @objc func showLoginWindow(_ sender: Any?) {
-        bringToFront()
+        showAccountWindow()
         if !model.state.isSignedIn { reconnect() }
     }
 
