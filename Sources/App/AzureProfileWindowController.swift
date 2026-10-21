@@ -5,14 +5,15 @@ import AzureClient
 /// GH-91: ventana de un perfil Azure. Muestra el estado de la sesión `az`:
 /// detectando, estado vacío con CTA (sin `az` o sin sesión; nunca datos de
 /// ejemplo), desconectado, o los tenants y suscripciones de la sesión para
-/// elegir los activos. El árbol de VMs/Bastion llega con #92.
+/// elegir los activos. GH-98: es la ventana auxiliar Cuenta Azure; el árbol de
+/// VMs/Bastion del ámbito elegido está en el Explorer del perfil.
 @MainActor
 final class AzureProfileWindowController: NSWindowController, NSOutlineViewDataSource, NSOutlineViewDelegate {
     enum Pane: Equatable { case detecting, signIn, signedOut, accounts }
 
     static let signInTitle = "Instala Azure CLI y ejecuta az login"
     static let accountsHint = "Elige el tenant y la suscripción activos de este perfil (doble clic o «Usar selección»)."
-    static let upcomingNote = "El árbol de VMs y la conexión vía Azure Bastion llegarán en una próxima versión."
+    static let upcomingNote = "El Explorer muestra los resource groups, VMs y Bastion del tenant o la suscripción activos."
 
     let model: AzureAccountModel
     /// Reintentar la detección (botón del estado vacío y «Conectar» tras Sign Out).

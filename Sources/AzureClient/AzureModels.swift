@@ -149,6 +149,40 @@ public struct AzureVM: Sendable, Equatable, Decodable {
     }
 }
 
+/// Estado de una VM (`virtualMachines?statusOnly=true`): solo el power state.
+public struct AzureVMStatus: Sendable, Equatable, Decodable {
+    public let id: String
+    /// Sufijo de `PowerState/<estado>` (`running`, `deallocated`…); `nil` si
+    /// ARM no lo informa (VM en transición o sin agente).
+    public let powerState: String?
+
+    public init(id: String, powerState: String?) {
+        self.id = id
+        self.powerState = powerState
+    }
+
+    private struct Raw: Decodable {
+        struct Properties: Decodable {
+            struct InstanceView: Decodable {
+                struct Status: Decodable { let code: String? }
+                let statuses: [Status]?
+            }
+            let instanceView: InstanceView?
+        }
+        let id: String
+        let properties: Properties?
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let raw = try Raw(from: decoder)
+        id = raw.id
+        powerState = raw.properties?.instanceView?.statuses?
+            .compactMap(\.code)
+            .first { $0.hasPrefix("PowerState/") }
+            .map { String($0.dropFirst("PowerState/".count)) }
+    }
+}
+
 public struct AzureNIC: Sendable, Equatable, Decodable {
     public struct IPConfiguration: Sendable, Equatable {
         public let privateIPAddress: String?

@@ -102,8 +102,10 @@ final class AzureAccountModel {
     /// fijan la cuenta esperada y el tenant del primer token.
     var boundAccount: @MainActor () -> (objectID: String?, tenantID: String?) = { (nil, nil) }
     private var facade: AzureCredentialFacade?
+    /// `az account list` de la conexión actual (para el directorio del Explorer).
+    private(set) var accounts: [AzCliAccount] = []
     /// Cada `connect`/`disconnect` invalida los resultados de los anteriores.
-    private var generation = 0
+    private(set) var generation = 0
     static let log = Logger(subsystem: "com.iapdesktop.mac", category: "azure.session")
 
     init(
@@ -116,7 +118,7 @@ final class AzureAccountModel {
         self.makeDirectory = makeDirectory
     }
 
-    /// Token ARM del perfil para `tenantID` (para el árbol/túnel de #92+).
+    /// Token ARM del perfil para `tenantID` (árbol del Explorer, GH-98; túnel Bastion).
     var accessToken: (@Sendable (String) async throws -> String)? {
         guard let facade, state.isSignedIn else { return nil }
         return { try await facade.accessToken(tenantID: $0) }
@@ -150,6 +152,7 @@ final class AzureAccountModel {
         let tenants = await Self.listTenants(
             directory: makeDirectory(facade, accounts), homeTenantID: identity.tenantID)
         guard current == generation else { return }
+        self.accounts = accounts
         selection = Self.resolveSelection(stored: selectionStore.load(), tenants: tenants, accounts: accounts)
         state = .ready(identity, tenants)
         Self.log.notice("""
@@ -164,6 +167,7 @@ final class AzureAccountModel {
         generation += 1
         let facade = self.facade
         self.facade = nil
+        accounts = []
         selection = nil
         state = .signedOut
         onIdentityChanged?(nil)
@@ -175,6 +179,7 @@ final class AzureAccountModel {
     func close() async {
         generation += 1
         facade = nil
+        accounts = []
         onIdentityChanged = nil
         onChange = nil
         await source.clearCache()
