@@ -3,19 +3,28 @@ import AuthKit
 import OSLog
 
 /// GH-72 (T-MT-4): N perfiles, una ventana Explorer por perfil abierto.
-/// Activar un perfil abierto solo lo trae al frente (misma `ProfileSession`,
+/// Activar un perfil abierto solo lo trae al frente (misma sesión,
 /// conexiones intactas); cerrar la ventana de uno solo limpia lo suyo.
+///
+/// GH-91: multi-proveedor. Cada perfil abre la sesión de su nube
+/// (`ProfileSession` para Google, `AzureProfileSession` para la sesión
+/// `az login`), ambas detrás de `ProfileSessionHosting`.
 @MainActor
 final class ProfileCoordinator {
     static let log = Logger(subsystem: "com.iapdesktop.mac", category: "profiles")
 
     private let store: ProfileStore
     private let migrationCompleted: Bool
-    private let registry = ProfileSessionRegistry<ProfileSession>()
+    private let registry = ProfileSessionRegistry<any ProfileSessionHosting>()
+    private let azureDependencies: AzureProfileSession.Dependencies
 
-    init(store: ProfileStore = ProfileStore(), migrationCompleted: Bool) {
+    init(
+        store: ProfileStore = ProfileStore(), migrationCompleted: Bool,
+        azureDependencies: AzureProfileSession.Dependencies = .live
+    ) {
         self.store = store
         self.migrationCompleted = migrationCompleted
+        self.azureDependencies = azureDependencies
     }
 
     /// Perfiles conocidos. Sin migración completada, el perfil legado existe
@@ -28,7 +37,7 @@ final class ProfileCoordinator {
         return list
     }
 
-    var openSessions: [ProfileSession] { registry.openIDs.compactMap(registry.session(for:)) }
+    var openSessions: [any ProfileSessionHosting] { registry.openIDs.compactMap(registry.session(for:)) }
 
     func isOpen(_ id: ProfileID) -> Bool { registry.session(for: id) != nil }
 
@@ -42,7 +51,7 @@ final class ProfileCoordinator {
     }
 
     /// Perfil de la ventana al frente (o de alguna de sus ventanas auxiliares).
-    var frontSession: ProfileSession? {
+    var frontSession: (any ProfileSessionHosting)? {
         for window in [NSApp.keyWindow, NSApp.mainWindow] {
             if let session = openSessions.first(where: { $0.owns(window) }) { return session }
         }
@@ -51,42 +60,61 @@ final class ProfileCoordinator {
 
     /// Abre (o enfoca) la ventana del perfil.
     @discardableResult
-    func activate(_ id: ProfileID) -> ProfileSession? {
+    func activate(_ id: ProfileID) -> (any ProfileSessionHosting)? {
         if let existing = registry.session(for: id) {
             _ = registry.activate(id) { existing }
             existing.bringToFront()
             return existing
         }
         guard let descriptor = profiles.first(where: { $0.id == id }) else { return nil }
-        guard let session = ProfileSession(id: id, descriptor: descriptor, environment: environment(for: id)) else {
+        guard let session = makeSession(for: descriptor) else {
             // Fallo aislado a este perfil (REQ-MT-6): los demás siguen abiertos.
             Self.log.error("profile open failed profile=\(id.rawValue, privacy: .public) cause=defaults")
             return nil
         }
         session.showsProfileName = { [weak self] in (self?.profiles.count ?? 0) > 1 }
-        session.onAccountChanged = { [weak self] session, credential in self?.accountChanged(session, credential) }
         session.onWindowClosed = { [weak self] session in self?.windowDidClose(for: session) }
         _ = registry.activate(id) { session }
         session.openWindow()
-        Self.log.notice("profile opened profile=\(id.rawValue, privacy: .public)")
+        Self.log.notice("""
+            profile opened profile=\(id.rawValue, privacy: .public) \
+            provider=\(descriptor.provider.rawValue, privacy: .public)
+            """)
         refreshTitles()
         return session
     }
 
-    /// Alta: `profileID` nuevo, nombre provisional, ventana y Sign In.
+    /// Sesión de la nube del perfil, con su callback de cuenta.
+    private func makeSession(for descriptor: ProfileDescriptor) -> (any ProfileSessionHosting)? {
+        let id = descriptor.id
+        switch descriptor.provider {
+        case .google:
+            let session = ProfileSession(id: id, descriptor: descriptor, environment: environment(for: id))
+            session?.onAccountChanged = { [weak self] session, credential in self?.accountChanged(session, credential) }
+            return session
+        case .azure:
+            let session = AzureProfileSession(
+                id: id, descriptor: descriptor, environment: environment(for: id), dependencies: azureDependencies)
+            session?.onAccountChanged = { [weak self] session, identity in self?.azureAccountChanged(session, identity) }
+            return session
+        }
+    }
+
+    /// Alta: `profileID` nuevo, nombre provisional, ventana y Sign In. Un
+    /// perfil Azure no tiene Sign In propio: su ventana detecta `az` al abrirse.
     @discardableResult
-    func createProfile(named name: String? = nil) -> ProfileSession? {
+    func createProfile(named name: String? = nil, provider: CloudProvider = .google) -> (any ProfileSessionHosting)? {
         let id = ProfileID.generate()
         let displayName = name.flatMap { $0.isEmpty ? nil : $0 } ?? "Perfil \(profiles.count + 1)"
         do {
-            try store.upsert(ProfileDescriptor(id: id, displayName: displayName))
+            try store.upsert(ProfileDescriptor(id: id, displayName: displayName, provider: provider))
         } catch {
             Self.log.error("profile create failed profile=\(id.rawValue, privacy: .public)")
             return nil
         }
-        Self.log.notice("profile created profile=\(id.rawValue, privacy: .public)")
+        Self.log.notice("profile created profile=\(id.rawValue, privacy: .public) provider=\(provider.rawValue, privacy: .public)")
         let session = activate(id)
-        session?.showLoginWindow(nil)
+        if provider == .google { session?.showLoginWindow(nil) }
         return session
     }
 
@@ -104,7 +132,7 @@ final class ProfileCoordinator {
         refreshTitles()
     }
 
-    private func windowDidClose(for session: ProfileSession) {
+    private func windowDidClose(for session: any ProfileSessionHosting) {
         guard registry.remove(session.id) != nil else { return }
         Self.log.notice("profile closed profile=\(session.id.rawValue, privacy: .public)")
         Task { await session.teardown() }
@@ -116,6 +144,26 @@ final class ProfileCoordinator {
         descriptor.issuer = credential?.issuer
         descriptor.redactedAccount = credential.map { ProfileDescriptor.redactedAccount(issuer: $0.issuer, account: $0.email) }
         if credential != nil { descriptor.lastUsedAt = Date() }
+        do {
+            try store.upsert(descriptor)
+            session.update(descriptor)
+        } catch {
+            Self.log.error("profile index update failed profile=\(session.id.rawValue, privacy: .public)")
+        }
+    }
+
+    /// Perfil Azure: fija la cuenta de la sesión `az` (tenant + `oid` + UPN
+    /// enmascarado) o, tras Sign Out, la libera para poder ligar otra cuenta.
+    private func azureAccountChanged(_ session: AzureProfileSession, _ identity: AzureAccountIdentity?) {
+        var descriptor = store.descriptor(for: session.id) ?? session.descriptor
+        if let identity {
+            descriptor.bindAzureAccount(identity)
+            descriptor.lastUsedAt = Date()
+        } else {
+            descriptor.homeTenantID = nil
+            descriptor.azureObjectID = nil
+            descriptor.redactedAccount = nil
+        }
         do {
             try store.upsert(descriptor)
             session.update(descriptor)

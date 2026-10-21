@@ -390,9 +390,10 @@ struct KeychainNamespaceAccess: Sendable {
 
 /// Sesiones vivas por perfil (una por ventana abierta). Genérico para poder
 /// probar la semántica del coordinador sin AppKit: activar un perfil abierto
-/// devuelve el MISMO objeto; cerrar uno no toca a los demás.
+/// devuelve el MISMO objeto; cerrar uno no toca a los demás. Sin restricción
+/// de clase para admitir existenciales (`any ProfileSessionHosting`, GH-91).
 @MainActor
-public final class ProfileSessionRegistry<Session: AnyObject> {
+public final class ProfileSessionRegistry<Session> {
     private var sessions: [ProfileID: Session] = [:]
     private var order: [ProfileID] = []
 

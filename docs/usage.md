@@ -29,7 +29,7 @@ swift build
 ```
 
 Compila todos los targets de `Package.swift` (`AuthKit`, `GCPClient`,
-`TunnelKit`, `SSHKit`, `TerminalUI`, `SFTPKit`, `RDPBridge`,
+`AzureClient`, `TunnelKit`, `SSHKit`, `TerminalUI`, `SFTPKit`, `RDPBridge`,
 `SettingsStore`, `ExplorerUI`, `App`). El binario queda en
 `.build/debug/App`.
 
@@ -467,3 +467,164 @@ update sin firma.
 No regenerar la clave para cada versión. Una rotación accidental deja a las
 instalaciones existentes sin una ruta confiable de actualización; si se pierde
 o compromete, seguir el procedimiento oficial de rotación de claves de Sparkle.
+
+## 13. Azure: VMs vía Azure Bastion (GH-84, en desarrollo)
+
+> **Estado actual**: en desarrollo. Ya hay perfiles Azure (#91) con la
+> autenticación de la sesión `az login` (`AuthKit`: `AzCliTokenSource`,
+> `AzureCredentialFacade`) y la elección de tenant/suscripción activos; el
+> árbol de VMs en el Explorer (#92) y el túnel Bastion (F2) aún no. Diseño
+> completo en [`specs/azure/`](../specs/azure/):
+> [`requirements.md`](../specs/azure/requirements.md),
+> [`design.md`](../specs/azure/design.md), [`tasks.md`](../specs/azure/tasks.md) y
+> la investigación [`azure-bastion-research.md`](../specs/azure/azure-bastion-research.md)
+> (la decisión de autenticación está en su §0.1).
+
+### 13.1 Requisitos: Azure CLI + `az login`
+
+La app **no tiene login Azure propio**: usa la sesión de Azure CLI del usuario.
+
+```bash
+brew install azure-cli
+az login                       # abre el navegador; usa tu cuenta corporativa
+az login --tenant <tenantId>   # si un tenant exige MFA/Conditional Access propio
+az account list --output table # comprueba qué ve la sesión
+```
+
+- La app busca `az` en el `PATH` y además en `/opt/homebrew/bin`,
+  `/usr/local/bin`, `/usr/bin` y `/bin` (un `.app` abierto desde Finder no
+  hereda el `PATH` de la shell).
+- Pide un token ARM por tenant con
+  `az account get-access-token --resource https://management.core.windows.net/ [--tenant <id>] --output json`
+  y lo guarda **solo en memoria** hasta que caduca (≈ 1 h). No escribe tokens
+  en disco ni en Keychain: los custodia el propio `az`.
+- Un perfil Azure guarda solo metadata no sensible: el tenant y el `oid` de la
+  cuenta de la sesión `az` (y el UPN enmascarado). Si `az` pasa a otra cuenta
+  (otro `az login`), el perfil lo detecta y avisa en lugar de usar esa cuenta.
+- Desconectar un perfil olvida sus tokens en memoria, pero **no** ejecuta
+  `az logout`: la sesión del CLI es tuya y la comparten otras herramientas.
+- Errores con instrucción concreta: `az` no instalado (`brew install
+  azure-cli`), sin sesión (`az login`), tenant que pide reautenticación
+  (`az login --tenant <id>`), `az` que no responde a tiempo, o cuenta distinta
+  a la del perfil.
+
+### 13.2 Crear un perfil Azure y elegir suscripción
+
+1. **Profiles → Add profile…**, nombre y nube **Microsoft Azure (sesión az
+   login)**. Los perfiles Google existentes no cambian.
+2. Al abrirse (o al arrancar la app con ese perfil), la ventana detecta `az`:
+   - sin `az` o sin sesión: estado vacío **«Instala Azure CLI y ejecuta az
+     login»** con los comandos, **Abrir Terminal**, **Copiar comandos** y
+     **Reintentar** (volver a la app tras `az login` también reintenta). No se
+     muestran datos de ejemplo;
+   - con sesión: el perfil queda ligado a esa cuenta (tenant + `oid`) y lista
+     los tenants y suscripciones de la sesión.
+3. Selecciona un tenant o una suscripción y pulsa **Usar selección** (o doble
+   clic). La elección se guarda en el perfil; si deja de existir, se usa la
+   suscripción por defecto de `az`.
+4. **Sign Out** desliga la cuenta del perfil (sin `az logout`); **Refresh**
+   (⌘R) vuelve a leer la sesión `az`.
+
+### 13.3 Cómo se detectan cuentas, tenants y suscripciones
+
+1. **Cuenta y tenants**: `az account list --output json` da la cuenta activa y
+   los tenants/suscripciones que conoce la sesión. Se completa con ARM
+   `GET /tenants` (nombre y dominio del tenant) usando el token de `az`.
+2. **Suscripciones**: ARM `GET /subscriptions` con el token de cada tenant
+   (estado actual, incluidas las creadas después del `az login`). Si ARM falla,
+   se usan las que `az` tenía en su caché. Se omiten las suscripciones
+   `Disabled`/`Deleted` y se deduplican las delegadas por Lighthouse.
+3. **Recursos**, por suscripción (hasta 4 suscripciones en paralelo): grupos de
+   recursos, VMs, NICs y `bastionHosts` vía ARM REST, siguiendo `nextLink` y
+   respetando `Retry-After` ante 429/503.
+4. **VM ↔ Bastion**: cada VM se asocia al Bastion de la VNet de su NIC
+   principal. Aún no se resuelven VNets *peered* ni el estado de encendido de
+   la VM.
+
+Un fallo en un tenant o suscripción (permisos, MFA pendiente) se marca en ese
+nodo y no impide cargar el resto.
+
+### 13.4 Cómo se abrirá el túnel
+
+> **No implementado todavía** (fase F2). El protocolo se está validando en el
+> spike F0 (#86).
+
+El plan (research §3.3–3.4, ruta 1) es un túnel **nativo en Swift**, sin
+delegar en `az network bastion tunnel`:
+
+1. ARM solo se usa para **leer** el Bastion (`dnsName`, SKU, `enableTunneling`);
+   no hay ninguna llamada ARM que "abra" el túnel.
+2. Por cada conexión TCP, la app pide un token de sesión al plano de datos del
+   Bastion (`POST https://{dnsName}/api/tokens`, con el token ARM de `az`).
+3. Abre un WebSocket `wss://{dnsName}/webtunnelv2/…` (puerto 443) y reenvía por
+   él los bytes de SSH (puerto 22) o RDP (3389), igual que hoy con IAP.
+
+Salida de red necesaria: `{dnsName}` del Bastion y `management.azure.com`,
+ambos por 443.
+
+### 13.5 Roles RBAC necesarios
+
+Para conectar con native client, la cuenta de `az` necesita como mínimo
+(ver research §2.1):
+
+| Recurso | Rol |
+|---|---|
+| VM | **Reader** |
+| NIC con la IP privada de la VM | **Reader** |
+| Recurso Azure Bastion | **Reader** |
+| VNet de la VM, si el Bastion está en una VNet *peered* | **Reader** |
+
+- Para el descubrimiento basta **Reader** en la suscripción o el grupo de recursos
+  (lo hereda todo lo anterior).
+- Estos roles permiten llegar a la VM, no iniciar sesión en ella: el login
+  SSH/RDP usa las credenciales del sistema operativo de la VM.
+
+### 13.6 SKU del Bastion: Standard o superior con native client
+
+La app solo puede conectar a través de un Bastion **Standard o Premium** con
+**Native Client Support** activado (`enableTunneling = true`). En el portal:
+*Bastion → Configuration → Native client support*.
+
+| SKU | Native client | Usable desde la app |
+|---|---|---|
+| Developer | No | No |
+| Basic | No | No |
+| Standard | Sí (`enableTunneling`) | **Sí** |
+| Premium | Sí (`enableTunneling`) | **Sí** |
+
+Un Bastion Basic o Developer aparecerá en el árbol, pero sin opción de
+conectar ("SKU sin native client: actualizar a Standard").
+
+### 13.7 Costo aproximado de Bastion
+
+Precios pay-as-you-go en `eastus` (Azure Retail Prices API, consultada
+2026-10-20; research §6.2). Varían por región y en el tiempo; consulta la
+[página de precios](https://azure.microsoft.com/en-us/pricing/details/azure-bastion/)
+antes de desplegar.
+
+| SKU | USD/hora (2 instancias) | Instancia adicional | ≈ USD/mes (730 h) |
+|---|---|---|---|
+| Developer | gratis | — | 0 |
+| Basic | 0.19 | — | ≈ 139 |
+| **Standard** | **0.29** | 0.14 | **≈ 212** |
+| Premium | 0.45 | 0.22 | ≈ 329 |
+
+- Bastion se cobra **por hora desde que se despliega**, se use o no.
+- Datos salientes: los primeros 5 GB/mes gratis, luego ≈ 0.087 USD/GB.
+- Standard cuesta entre 0.29 y 0.362 USD/h según la región.
+- Un mismo Bastion da servicio a las VMs de su VNet y de las VNets *peered*, así
+  que lo habitual es uno por VNet hub (≈ 212 USD/mes en Standard).
+
+### 13.8 Limitación: RDP con Entra ID no funciona desde macOS
+
+Microsoft solo permite RDP con **Entra ID** a través de Bastion native client
+desde PCs **Windows 10+** registrados o unidos a Entra en el mismo directorio que
+la VM (research §3.6). Desde un Mac no es posible, ni con esta app ni con `az`.
+
+Alternativas:
+
+- **Credenciales locales o de dominio** (AD DS) de la VM para el login RDP.
+- Si la VM solo admite login Entra (sin cuenta local): un **jump host Windows**
+  unido a Entra, desde el que se abre el RDP.
+
+SSH no tiene esta limitación con usuario/clave o llave de la VM.
