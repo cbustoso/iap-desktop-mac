@@ -63,6 +63,8 @@ public final class ExplorerWindowController: NSWindowController {
     /// Doble clic en una instancia. Sin handler se muestra el aviso de hito
     /// (M1/M2); la App lo conecta a SSH (SshSession + TerminalUI).
     public var onConnectRequest: (@MainActor (InstanceInfo) -> Void)?
+    /// Azure connect is enabled only when the VM has an assigned, native-client-capable Bastion.
+    public var onAzureConnectRequest: (@MainActor (AzureExplorerVMNode) -> Void)?
     /// La App ejecuta la operación GCE después de la confirmación del usuario.
     public var onVmControlRequest: (@MainActor (VmControlAction, InstanceInfo) -> Void)?
     /// "Generate Windows credentials…" en una instancia Windows (CBU-54): la App
@@ -80,7 +82,7 @@ public final class ExplorerWindowController: NSWindowController {
     let propertiesPane = PropertiesView()
     let statusBar = StatusBarView()
 
-    private var rootItem: OutlineItem?
+    private var rootItems: [OutlineItem] = []
     private var isReloading = false
     private(set) var selectedNode: ExplorerNode?
 
@@ -110,6 +112,15 @@ public final class ExplorerWindowController: NSWindowController {
         window.center()
         reload()
         viewModel.onChange = { [weak self] in self?.reload() }
+        propertiesPane.onBastionSelection = { [weak self] bastionID, virtualMachineID in
+            guard let self else { return }
+            Task { @MainActor in
+                if case .failure(let error) = await self.viewModel.selectAzureBastion(
+                    id: bastionID, forVirtualMachineID: virtualMachineID) {
+                    self.statusNote = "No se pudo guardar el Bastion: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     @available(*, unavailable)
@@ -295,6 +306,9 @@ public final class ExplorerWindowController: NSWindowController {
             .zone(project: zone.project, zone: zone.name)
         case .instance(let instance):
             .instance(project: instance.project, zone: instance.zone, instance: instance.name)
+        case .azure, .azureStatus, .azureAccount, .azureTenant, .azureSubscription,
+             .azureResourceGroup, .azureVirtualMachine, .azureBastion:
+            .universe
         }
     }
 
@@ -314,6 +328,11 @@ public final class ExplorerWindowController: NSWindowController {
 
     static func isSshTarget(_ node: ExplorerNode) -> Bool {
         if case .instance(let instance) = node { return instance.os == .linux }
+        return false
+    }
+
+    static func isAzureConnectTarget(_ node: ExplorerNode) -> Bool {
+        if case .azureVirtualMachine(let vm) = node { return vm.connectDisabledReason == nil }
         return false
     }
 
@@ -343,6 +362,14 @@ public final class ExplorerWindowController: NSWindowController {
             showStub(
                 title: "Connect to \(instance.name)",
                 milestone: instance.os.connectMilestone)
+        } else if case .azureVirtualMachine(let vm) = item.node {
+            if let reason = vm.connectDisabledReason {
+                showMessage(title: "Connect to \(vm.virtualMachine.name)", text: reason)
+            } else if let onAzureConnectRequest {
+                onAzureConnectRequest(vm)
+            } else {
+                showMessage(title: "Connect to \(vm.virtualMachine.name)", text: "La sesión Azure aún no ha conectado el transporte Bastion.")
+            }
         } else if outline.isItemExpanded(item) {
             outline.collapseItem(item)
         } else {
@@ -355,6 +382,8 @@ public final class ExplorerWindowController: NSWindowController {
         switch payload.command {
         case .connect where Self.isSshTarget(payload.node) && onConnectRequest != nil:
             if case .instance(let instance) = payload.node { onConnectRequest?(instance) }
+        case .connect where Self.isAzureConnectTarget(payload.node) && onAzureConnectRequest != nil:
+            if case .azureVirtualMachine(let vm) = payload.node { onAzureConnectRequest?(vm) }
         case .generateWindowsCredentials:
             if case .instance(let instance) = payload.node, instance.os == .windows {
                 onGenerateWindowsCredentialsRequest?(instance)
@@ -363,7 +392,8 @@ public final class ExplorerWindowController: NSWindowController {
             switch payload.node {
             case .instance(let instance): onSoftwarePackagesRequest?(.instance(instance))
             case .zone(let zone): onSoftwarePackagesRequest?(.zone(zone))
-            case .cloud, .project: break
+            case .cloud, .project, .azure, .azureStatus, .azureAccount, .azureTenant,
+                 .azureSubscription, .azureResourceGroup, .azureVirtualMachine, .azureBastion: break
             }
         case .connect, .connectAsUser, .connectionSettings:
             showStub(title: payload.command.title, milestone: payload.command.milestone ?? "M2")
@@ -438,30 +468,67 @@ public final class ExplorerWindowController: NSWindowController {
         let cloud = ExplorerNode.cloud(
             projectCount: projects.count,
             instanceCount: projects.reduce(0) { $0 + $1.zones.reduce(0) { $0 + $1.instances.count } })
-        let signedIn = viewModel.isSignedIn
-        signInPrompt.isHidden = signedIn
-        outlineScroll.isHidden = !signedIn
-        rootItem = !signedIn ? nil : OutlineItem(
-            node: cloud,
-            children: projects.map { project in
-                OutlineItem(
-                    node: .project(project),
-                    children: project.zones.map { zone in
-                        OutlineItem(
-                            node: .zone(zone),
-                            children: zone.instances.map { OutlineItem(node: .instance($0), children: []) })
-                    })
-            })
+        var roots: [OutlineItem] = []
+        if viewModel.isSignedIn {
+            roots.append(OutlineItem(
+                node: cloud,
+                children: projects.map { project in
+                    OutlineItem(
+                        node: .project(project),
+                        children: project.zones.map { zone in
+                            OutlineItem(
+                                node: .zone(zone),
+                                children: zone.instances.map { OutlineItem(node: .instance($0), children: []) })
+                        })
+                }))
+        }
+        if let azureState = viewModel.azureState {
+            roots.append(Self.azureRoot(for: azureState))
+        }
+        rootItems = roots
+        signInPrompt.isHidden = !roots.isEmpty
+        outlineScroll.isHidden = roots.isEmpty
 
         isReloading = true
         outline.reloadData()
-        if let rootItem { outline.expandItem(rootItem, expandChildren: true) }
+        for root in rootItems { outline.expandItem(root, expandChildren: true) }
         isReloading = false
 
         statusBar.summary = viewModel.statusSummary(source: dataSourceLabel)
         if let previousID, selectNode(id: previousID) { return }
         outline.deselectAll(nil)
         select(nil)
+    }
+
+    private static func azureRoot(for state: AzureExplorerState) -> OutlineItem {
+        let children: [OutlineItem]
+        switch state {
+        case .noSession:
+            children = [OutlineItem(node: .azureStatus(.noSession), children: [])]
+        case .loading(let account):
+            children = [OutlineItem(node: .azureAccount(account), children: [
+                OutlineItem(node: .azureStatus(.loading), children: []),
+            ])]
+        case .failed(let account, let message):
+            children = [OutlineItem(node: .azureAccount(account), children: [
+                OutlineItem(node: .azureStatus(.error(message)), children: []),
+            ])]
+        case .loaded(let snapshot):
+            let tenants = snapshot.tenants.map { tenantNode in
+                OutlineItem(node: .azureTenant(tenantNode.tenant), children: tenantNode.subscriptions.map { subscriptionNode in
+                    OutlineItem(node: .azureSubscription(subscriptionNode.subscription), children: subscriptionNode.resourceGroups.map { groupNode in
+                        OutlineItem(node: .azureResourceGroup(groupNode.resourceGroup), children: groupNode.virtualMachines.map { vmNode in
+                            OutlineItem(node: .azureVirtualMachine(vmNode), children: vmNode.bastions.map { bastion in
+                                OutlineItem(node: .azureBastion(
+                                    bastion, selected: bastion.id == vmNode.selectedBastionID), children: [])
+                            })
+                        })
+                    })
+                })
+            }
+            children = [OutlineItem(node: .azureAccount(snapshot.account), children: tenants)]
+        }
+        return OutlineItem(node: .azure, children: children)
     }
 
     /// Selecciona el nodo con ese id (si está visible). Devuelve si lo encontró.
@@ -558,6 +625,7 @@ extension ExplorerWindowController: NSMenuDelegate {
         guard let item = outline.item(atRow: outline.clickedRow) as? OutlineItem else { return }
         for menuItem in Self.contextMenuItems(
             for: item.node, target: self, sshConnectAvailable: onConnectRequest != nil,
+            azureConnectAvailable: onAzureConnectRequest != nil,
             vmControlAvailable: onVmControlRequest != nil,
             windowsCredentialsAvailable: onGenerateWindowsCredentialsRequest != nil,
             softwarePackagesAvailable: onSoftwarePackagesRequest != nil) {
@@ -567,6 +635,7 @@ extension ExplorerWindowController: NSMenuDelegate {
 
     static func contextMenuItems(
         for node: ExplorerNode, target: AnyObject?, sshConnectAvailable: Bool = false,
+        azureConnectAvailable: Bool = false,
         vmControlAvailable: Bool = false, windowsCredentialsAvailable: Bool = false,
         softwarePackagesAvailable: Bool = false
     ) -> [NSMenuItem] {
@@ -592,6 +661,11 @@ extension ExplorerWindowController: NSMenuDelegate {
                 if command == .connect, sshConnectAvailable, Self.isSshTarget(node) {
                     item.isEnabled = true
                     item.toolTip = "Abrir sesión SSH vía IAP"
+                    return item
+                }
+                if command == .connect, case .azureVirtualMachine(let vm) = node {
+                    item.isEnabled = vm.connectDisabledReason == nil && azureConnectAvailable
+                    item.toolTip = vm.connectDisabledReason ?? "Conectar mediante Azure Bastion"
                     return item
                 }
                 if command == .generateWindowsCredentials {
@@ -678,12 +752,12 @@ extension ExplorerWindowController: NSSplitViewDelegate {
 
 extension ExplorerWindowController: NSOutlineViewDataSource {
     public func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        guard let parent = item as? OutlineItem else { return rootItem == nil ? 0 : 1 }
+        guard let parent = item as? OutlineItem else { return rootItems.count }
         return parent.children.count
     }
 
     public func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        guard let parent = item as? OutlineItem else { return rootItem as Any }
+        guard let parent = item as? OutlineItem else { return rootItems[index] }
         return parent.children[index]
     }
 
@@ -730,6 +804,29 @@ extension ExplorerWindowController: NSOutlineViewDelegate {
                 icon.contentTintColor = .controlAccentColor
                 text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
             }
+        case .azure:
+            icon.contentTintColor = .systemBlue
+            text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold)
+        case .azureStatus(let status):
+            switch status {
+            case .loading: icon.contentTintColor = .secondaryLabelColor
+            case .noSession, .error: icon.contentTintColor = .systemOrange
+            }
+        case .azureAccount, .azureTenant, .azureSubscription, .azureResourceGroup:
+            icon.contentTintColor = .secondaryLabelColor
+        case .azureVirtualMachine(let vm):
+            switch vm.powerState {
+            case .running?: icon.contentTintColor = .systemGreen
+            case .starting?, .stopping?, .unknown?: icon.contentTintColor = .systemOrange
+            case .stopped?, .deallocated?:
+                icon.contentTintColor = .tertiaryLabelColor
+                text.textColor = .secondaryLabelColor
+            case nil: icon.contentTintColor = .secondaryLabelColor
+            }
+            icon.setAccessibilityLabel("Azure VM, \(vm.powerState?.displayName ?? "power state unavailable")")
+        case .azureBastion(_, let selected):
+            icon.contentTintColor = selected ? .controlAccentColor : .secondaryLabelColor
+            if selected { text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .semibold) }
         }
         cell.toolTip = node.properties.map { "\($0.label): \($0.value)" }.joined(separator: "\n")
         return cell

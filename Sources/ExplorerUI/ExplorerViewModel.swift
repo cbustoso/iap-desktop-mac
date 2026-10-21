@@ -19,12 +19,23 @@ public final class ExplorerViewModel {
     public private(set) var isSignedIn: Bool
     /// Sube en cada fin de sesión: una carga empezada antes se descarta.
     private var sessionGeneration = 0
+    private var azureSessionGeneration = 0
+    private var azureDataSource: (any AzureExplorerDataSource)?
+    public private(set) var azureState: AzureExplorerState?
 
     /// - Parameter isSignedIn: `false` en la App hasta restaurar/iniciar sesión;
     ///   `true` (default) para un snapshot ya autorizado (tests, previews).
-    public init(projects: [ProjectInfo] = [], isSignedIn: Bool = true) {
+    public init(
+        projects: [ProjectInfo] = [], isSignedIn: Bool = true,
+        azureAccount: AzureExplorerAccount? = nil,
+        azureDataSource: (any AzureExplorerDataSource)? = nil
+    ) {
         self.isSignedIn = isSignedIn
         self.projects = isSignedIn ? projects : []
+        self.azureDataSource = azureDataSource
+        if let azureAccount {
+            azureState = azureDataSource == nil ? .noSession : .loading(azureAccount)
+        }
     }
 
     /// Sesión válida (restaurada o recién autorizada): habilita las cargas.
@@ -42,6 +53,147 @@ public final class ExplorerViewModel {
         isLive = false
         isSignedIn = false
         projects = []
+    }
+
+    /// Installs the App-owned adapter after an Azure profile signs in.
+    public func azureSessionStarted(
+        account: AzureExplorerAccount, dataSource: any AzureExplorerDataSource
+    ) {
+        azureSessionGeneration += 1
+        azureDataSource = dataSource
+        azureState = .loading(account)
+        onChange?()
+    }
+
+    /// Removes all Azure inventory while keeping an explicit no-session state.
+    public func azureSessionEnded() {
+        azureSessionGeneration += 1
+        azureDataSource = nil
+        azureState = .noSession
+        onChange?()
+    }
+
+    /// Loads a complete, internally consistent Azure snapshot. Production data only comes
+    /// from the App-provided adapter; ExplorerUI has no fallback or mock inventory.
+    @discardableResult
+    public func reloadAzure() async -> Result<Void, any Error> {
+        guard let dataSource = azureDataSource else {
+            azureState = .noSession
+            onChange?()
+            return .failure(ExplorerSessionError.signedOut)
+        }
+        let account: AzureExplorerAccount
+        switch azureState {
+        case .loading(let value), .failed(let value, _): account = value
+        case .loaded(let snapshot): account = snapshot.account
+        case .noSession, nil: return .failure(ExplorerSessionError.signedOut)
+        }
+        let generation = azureSessionGeneration
+        azureState = .loading(account)
+        onChange?()
+        do {
+            let snapshot = try await Self.loadAzure(account: account, dataSource: dataSource)
+            guard generation == azureSessionGeneration else {
+                return .failure(ExplorerSessionError.signedOut)
+            }
+            azureState = .loaded(snapshot)
+            onChange?()
+            return .success(())
+        } catch {
+            guard generation == azureSessionGeneration else {
+                return .failure(ExplorerSessionError.signedOut)
+            }
+            azureState = .failed(account: account, message: Self.azureErrorMessage(error))
+            onChange?()
+            return .failure(error)
+        }
+    }
+
+    @discardableResult
+    public func selectAzureBastion(
+        id: String?, forVirtualMachineID virtualMachineID: String
+    ) async -> Result<Void, any Error> {
+        guard let dataSource = azureDataSource else {
+            return .failure(ExplorerSessionError.signedOut)
+        }
+        do {
+            try await dataSource.selectBastion(id: id, forVirtualMachineID: virtualMachineID)
+            guard case .loaded(let snapshot) = azureState else { return .success(()) }
+            azureState = .loaded(Self.replacingBastionSelection(
+                in: snapshot, virtualMachineID: virtualMachineID, selectedID: id))
+            onChange?()
+            return .success(())
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private static func loadAzure(
+        account: AzureExplorerAccount, dataSource: any AzureExplorerDataSource
+    ) async throws -> AzureExplorerSnapshot {
+        var tenantNodes: [AzureExplorerTenantNode] = []
+        for tenant in try await dataSource.listTenants() {
+            var subscriptionNodes: [AzureExplorerSubscriptionNode] = []
+            for subscription in try await dataSource.listSubscriptions(forTenantID: tenant.id) {
+                var groupNodes: [AzureExplorerResourceGroupNode] = []
+                let groups = try await dataSource.listResourceGroups(
+                    forSubscriptionID: subscription.id, tenantID: tenant.id)
+                for group in groups {
+                    var vmNodes: [AzureExplorerVMNode] = []
+                    let vms = try await dataSource.listVirtualMachines(
+                        forResourceGroup: group.name, subscriptionID: subscription.id,
+                        tenantID: tenant.id)
+                    for vm in vms {
+                        async let bastions = dataSource.listBastions(
+                            forVirtualMachineID: vm.id, resourceGroup: group.name,
+                            subscriptionID: subscription.id, tenantID: tenant.id)
+                        async let powerState = dataSource.powerState(
+                            forVirtualMachineID: vm.id, subscriptionID: subscription.id,
+                            tenantID: tenant.id)
+                        async let selectedID = dataSource.selectedBastionID(forVirtualMachineID: vm.id)
+                        vmNodes.append(AzureExplorerVMNode(
+                            tenant: tenant, subscription: subscription, resourceGroup: group,
+                            virtualMachine: vm, powerState: try await powerState,
+                            bastions: try await bastions, selectedBastionID: await selectedID))
+                    }
+                    groupNodes.append(AzureExplorerResourceGroupNode(
+                        resourceGroup: group,
+                        virtualMachines: vmNodes.sorted { $0.virtualMachine.name.localizedStandardCompare($1.virtualMachine.name) == .orderedAscending }))
+                }
+                subscriptionNodes.append(AzureExplorerSubscriptionNode(
+                    subscription: subscription,
+                    resourceGroups: groupNodes.sorted { $0.resourceGroup.name.localizedStandardCompare($1.resourceGroup.name) == .orderedAscending }))
+            }
+            tenantNodes.append(AzureExplorerTenantNode(
+                tenant: tenant,
+                subscriptions: subscriptionNodes.sorted { $0.subscription.displayName.localizedStandardCompare($1.subscription.displayName) == .orderedAscending }))
+        }
+        return AzureExplorerSnapshot(account: account, tenants: tenantNodes)
+    }
+
+    private static func replacingBastionSelection(
+        in snapshot: AzureExplorerSnapshot, virtualMachineID: String, selectedID: String?
+    ) -> AzureExplorerSnapshot {
+        let tenants = snapshot.tenants.map { tenantNode in
+            AzureExplorerTenantNode(tenant: tenantNode.tenant, subscriptions: tenantNode.subscriptions.map { subscriptionNode in
+                AzureExplorerSubscriptionNode(subscription: subscriptionNode.subscription, resourceGroups: subscriptionNode.resourceGroups.map { groupNode in
+                    AzureExplorerResourceGroupNode(resourceGroup: groupNode.resourceGroup, virtualMachines: groupNode.virtualMachines.map { vmNode in
+                        guard vmNode.virtualMachine.id == virtualMachineID else { return vmNode }
+                        return AzureExplorerVMNode(
+                            tenant: vmNode.tenant, subscription: vmNode.subscription,
+                            resourceGroup: vmNode.resourceGroup, virtualMachine: vmNode.virtualMachine,
+                            powerState: vmNode.powerState, bastions: vmNode.bastions,
+                            selectedBastionID: selectedID)
+                    })
+                })
+            })
+        }
+        return AzureExplorerSnapshot(account: snapshot.account, tenants: tenants)
+    }
+
+    private static func azureErrorMessage(_ error: any Error) -> String {
+        "No se pudo cargar Azure: \(error.localizedDescription). "
+            + "Instala Azure CLI y ejecuta `az login`, y vuelve a intentarlo."
     }
 
     /// Replaces the current snapshot only after a complete successful load.
@@ -129,7 +281,22 @@ public final class ExplorerViewModel {
     /// Texto de la status bar: "LIVE — 2 proyectos, 6 instancias (3 visibles)";
     /// antes de la primera carga, `source`; sin sesión, "Sin sesión".
     public func statusSummary(source fallback: String) -> String {
-        guard isSignedIn else { return Self.signedOutSummary }
+        guard isSignedIn else {
+            switch azureState {
+            case .noSession, nil: return Self.signedOutSummary
+            case .loading: return "Azure — Cargando…"
+            case .failed: return "Azure — Error"
+            case .loaded(let snapshot):
+                let count = snapshot.tenants.reduce(0) { tenantTotal, tenant in
+                    tenantTotal + tenant.subscriptions.reduce(0) { subscriptionTotal, subscription in
+                        subscriptionTotal + subscription.resourceGroups.reduce(0) {
+                            $0 + $1.virtualMachines.count
+                        }
+                    }
+                }
+                return "Azure — \(Self.plural(count, "máquina virtual", "máquinas virtuales"))"
+            }
+        }
         let source = isLive ? "LIVE" : fallback
         var text = "\(source) — \(Self.plural(projectCount, "proyecto", "proyectos")), "
             + Self.plural(instanceCount, "instancia", "instancias")

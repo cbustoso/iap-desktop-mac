@@ -6,6 +6,8 @@ final class PropertiesView: NSView {
     private let header = NSTextField(labelWithString: "Properties")
     private let content = FlippedView()
     private(set) var rows: [PropertyRow] = []
+    private(set) var bastionSelector: NSPopUpButton?
+    var onBastionSelection: (@MainActor (String?, String) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -18,6 +20,7 @@ final class PropertiesView: NSView {
 
     func show(_ node: ExplorerNode?) {
         content.subviews.forEach { $0.removeFromSuperview() }
+        bastionSelector = nil
         guard let node else {
             rows = []
             let hint = NSTextField(labelWithString: "Selecciona un elemento en Project Explorer.")
@@ -51,11 +54,51 @@ final class PropertiesView: NSView {
         grid.column(at: 0).xPlacement = .trailing
         grid.column(at: 0).width = 130
 
-        let stack = NSStackView(views: [titleRow, grid])
+        var views: [NSView] = [titleRow]
+        if case .azureVirtualMachine(let vmNode) = node {
+            views.append(makeBastionSelector(for: vmNode))
+        }
+        views.append(grid)
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         place(stack)
+    }
+
+    private func makeBastionSelector(for node: AzureExplorerVMNode) -> NSView {
+        let label = NSTextField(labelWithString: "Bastion:")
+        label.textColor = .secondaryLabelColor
+        let popup = NSPopUpButton()
+        bastionSelector = popup
+        if node.bastions.isEmpty {
+            popup.addItem(withTitle: "No hay Bastion disponible")
+            popup.isEnabled = false
+        } else {
+            popup.addItem(withTitle: "Sin asignar — selecciona un Bastion")
+            popup.lastItem?.representedObject = NSNull()
+            for bastion in node.bastions {
+                let suffix = bastion.supportsNativeClient ? "" : " — no apto"
+                popup.addItem(withTitle: "\(bastion.name) (\(bastion.sku))\(suffix)")
+                popup.lastItem?.representedObject = bastion.id
+            }
+            if let selectedID = node.selectedBastionID,
+               let index = popup.itemArray.firstIndex(where: { ($0.representedObject as? String) == selectedID }) {
+                popup.selectItem(at: index)
+            }
+            popup.target = self
+            popup.action = #selector(bastionChanged(_:))
+        }
+        popup.identifier = NSUserInterfaceItemIdentifier(node.virtualMachine.id)
+        popup.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let row = NSStackView(views: [label, popup])
+        row.spacing = 16
+        return row
+    }
+
+    @objc private func bastionChanged(_ sender: NSPopUpButton) {
+        guard let virtualMachineID = sender.identifier?.rawValue else { return }
+        onBastionSelection?(sender.selectedItem?.representedObject as? String, virtualMachineID)
     }
 
     private func place(_ view: NSView) {

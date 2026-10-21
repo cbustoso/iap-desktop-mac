@@ -1,12 +1,34 @@
 // ExplorerUI: nodo del árbol + presentación pura (icono, propiedades, menú
 // contextual). Sin AppKit para que sea testeable sin ventana.
 
-/// Nodo del árbol Google Cloud → Proyecto → Zona → Instancia.
+public enum AzureExplorerStatus: Hashable, Sendable {
+    case noSession
+    case loading
+    case error(String)
+
+    var title: String {
+        switch self {
+        case .noSession: "Sin sesión Azure"
+        case .loading: "Cargando…"
+        case .error: "Error al cargar Azure"
+        }
+    }
+}
+
+/// Nodo del árbol para las secciones Google Cloud y Microsoft Azure.
 public enum ExplorerNode: Hashable, Sendable {
     case cloud(projectCount: Int, instanceCount: Int)
     case project(ProjectInfo)
     case zone(ZoneInfo)
     case instance(InstanceInfo)
+    case azure
+    case azureStatus(AzureExplorerStatus)
+    case azureAccount(AzureExplorerAccount)
+    case azureTenant(AzureExplorerTenant)
+    case azureSubscription(AzureExplorerSubscription)
+    case azureResourceGroup(AzureExplorerResourceGroup)
+    case azureVirtualMachine(AzureExplorerVMNode)
+    case azureBastion(AzureExplorerBastion, selected: Bool)
 
     /// Identidad estable entre recargas (el contenido filtrado cambia, el id no).
     public var id: String {
@@ -15,6 +37,14 @@ public enum ExplorerNode: Hashable, Sendable {
         case .project(let p): return "project:\(p.id)"
         case .zone(let z): return "zone:\(z.id)"
         case .instance(let i): return "instance:\(i.id)"
+        case .azure: return "azure"
+        case .azureStatus: return "azure:status"
+        case .azureAccount(let account): return "azure:account:\(account.id)"
+        case .azureTenant(let tenant): return "azure:tenant:\(tenant.id)"
+        case .azureSubscription(let subscription): return "azure:subscription:\(subscription.id)"
+        case .azureResourceGroup(let group): return "azure:resource-group:\(group.name)"
+        case .azureVirtualMachine(let node): return "azure:vm:\(node.virtualMachine.id)"
+        case .azureBastion(let bastion, _): return "azure:bastion:\(bastion.id)"
         }
     }
 
@@ -24,6 +54,17 @@ public enum ExplorerNode: Hashable, Sendable {
         case .project(let p): return p.name
         case .zone(let z): return z.name
         case .instance(let i): return i.name
+        case .azure: return "Microsoft Azure"
+        case .azureStatus(let status): return status.title
+        case .azureAccount(let account): return account.displayName
+        case .azureTenant(let tenant): return tenant.displayName ?? tenant.defaultDomain ?? tenant.id
+        case .azureSubscription(let subscription): return subscription.displayName
+        case .azureResourceGroup(let group): return group.name
+        case .azureVirtualMachine(let node):
+            guard let state = node.powerState else { return node.virtualMachine.name }
+            return "\(node.virtualMachine.name) — \(state.displayName)"
+        case .azureBastion(let bastion, let selected):
+            return selected ? "\(bastion.name) (selected)" : bastion.name
         }
     }
 
@@ -38,6 +79,20 @@ public enum ExplorerNode: Hashable, Sendable {
             case .linux: return "terminal"
             case .windows: return "pc"
             }
+        case .azure: return "cloud"
+        case .azureStatus(let status):
+            switch status {
+            case .noSession: return "person.crop.circle.badge.exclamationmark"
+            case .loading: return "hourglass"
+            case .error: return "exclamationmark.triangle"
+            }
+        case .azureAccount: return "person.crop.circle"
+        case .azureTenant: return "building.2"
+        case .azureSubscription: return "rectangle.stack"
+        case .azureResourceGroup: return "folder"
+        case .azureVirtualMachine(let node):
+            return node.virtualMachine.operatingSystem == .windows ? "pc" : "terminal"
+        case .azureBastion: return "shield.lefthalf.filled"
         }
     }
 
@@ -48,6 +103,9 @@ public enum ExplorerNode: Hashable, Sendable {
         case .project(let p): return p.name
         case .zone(let z): return z.project
         case .instance(let i): return i.project
+        case .azure, .azureStatus, .azureAccount, .azureTenant, .azureSubscription,
+             .azureResourceGroup, .azureVirtualMachine, .azureBastion:
+            return nil
         }
     }
 
@@ -90,6 +148,54 @@ public enum ExplorerNode: Hashable, Sendable {
                 PropertyRow("Session", i.connected ? "Connected" : "Not connected"),
                 PropertyRow("Resource", "projects/\(i.project)/zones/\(i.zone)/instances/\(i.name)"),
             ]
+        case .azure:
+            return [PropertyRow("Name", "Microsoft Azure"), PropertyRow("Type", "Cloud")]
+        case .azureStatus(let status):
+            switch status {
+            case .noSession:
+                return [PropertyRow("Status", "Sin sesión Azure"),
+                        PropertyRow("Action", "Instala Azure CLI y ejecuta `az login`")]
+            case .loading:
+                return [PropertyRow("Status", "Cargando inventario Azure…")]
+            case .error(let message):
+                return [PropertyRow("Status", "Error"), PropertyRow("Action", message)]
+            }
+        case .azureAccount(let account):
+            return [PropertyRow("Name", account.displayName), PropertyRow("Type", "Azure account"),
+                    PropertyRow("Profile ID", account.id),
+                    PropertyRow("Username", account.username ?? "No disponible")]
+        case .azureTenant(let tenant):
+            return [PropertyRow("Name", tenant.displayName ?? "No disponible"),
+                    PropertyRow("Type", "Tenant"), PropertyRow("Tenant ID", tenant.id),
+                    PropertyRow("Domain", tenant.defaultDomain ?? "No disponible")]
+        case .azureSubscription(let subscription):
+            return [PropertyRow("Name", subscription.displayName), PropertyRow("Type", "Subscription"),
+                    PropertyRow("Subscription ID", subscription.id), PropertyRow("State", subscription.state)]
+        case .azureResourceGroup(let group):
+            return [PropertyRow("Name", group.name), PropertyRow("Type", "Resource group"),
+                    PropertyRow("Location", group.location ?? "No disponible")]
+        case .azureVirtualMachine(let node):
+            let vm = node.virtualMachine
+            let bastion = node.selectedBastion
+            return [
+                PropertyRow("Name", vm.name), PropertyRow("Type", "Virtual machine"),
+                PropertyRow("Operating system", vm.operatingSystem?.displayName ?? "Unknown"),
+                PropertyRow("Power state", node.powerState?.displayName ?? "No disponible"),
+                PropertyRow("Private IP", vm.privateIPAddress ?? "No disponible"),
+                PropertyRow("Resource group", node.resourceGroup.name),
+                PropertyRow("Subscription", node.subscription.displayName),
+                PropertyRow("Tenant", node.tenant.displayName ?? node.tenant.id),
+                PropertyRow("Bastion", bastion?.name ?? "Sin asignar"),
+                PropertyRow("Bastion SKU", bastion?.sku ?? "No disponible"),
+                PropertyRow("Native Client", bastion.map { $0.enableTunneling ? "Enabled" : "Disabled" } ?? "No disponible"),
+                PropertyRow("Connect", node.connectDisabledReason ?? "Available"),
+                PropertyRow("Resource", vm.id),
+            ]
+        case .azureBastion(let bastion, let selected):
+            return [PropertyRow("Name", bastion.name), PropertyRow("Type", "Bastion host"),
+                    PropertyRow("SKU", bastion.sku),
+                    PropertyRow("Native Client", bastion.enableTunneling ? "Enabled" : "Disabled"),
+                    PropertyRow("Selected", selected ? "Yes" : "No"), PropertyRow("Resource", bastion.id)]
         }
     }
 }
@@ -204,6 +310,11 @@ public enum ExplorerContextMenu {
         case .project:
             return [.command(.refreshProject), .separator, .command(.properties)]
         case .cloud:
+            return [.command(.properties)]
+        case .azureVirtualMachine:
+            return [.command(.connect), .separator, .command(.properties)]
+        case .azure, .azureStatus, .azureAccount, .azureTenant, .azureSubscription,
+             .azureResourceGroup, .azureBastion:
             return [.command(.properties)]
         }
     }
