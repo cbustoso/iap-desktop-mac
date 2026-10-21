@@ -82,7 +82,8 @@ public final class IapListener: Sendable {
     }
 
     /// Solo loopback (IPv4/IPv6): nadie de la red local usa el túnel ajeno.
-    static func isClientAllowed(_ endpoint: NWEndpoint) -> Bool {
+    /// Público: `BastionLocalForwarder` (GH-94) aplica el mismo filtro.
+    public static func isClientAllowed(_ endpoint: NWEndpoint) -> Bool {
         guard case .hostPort(let host, _) = endpoint else { return false }
         switch host {
         case .ipv4(let address): return address == .loopback
