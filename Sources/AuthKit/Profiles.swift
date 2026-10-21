@@ -29,36 +29,94 @@ public struct ProfileID: RawRepresentable, Hashable, Codable, Sendable, CustomSt
     public var description: String { rawValue }
 }
 
+/// Nube de la cuenta de un perfil (GH-88). Un perfil es de UNA sola nube:
+/// las cuentas Google y Azure nunca comparten perfil ni Keychain.
+public enum CloudProvider: String, Codable, Sendable, CaseIterable {
+    case google
+    case azure
+}
+
 /// Metadata no sensible de un perfil (lo que muestra el selector).
+///
+/// GH-88: `provider` se añadió después del índice original. Un índice
+/// escrito por builds anteriores (sin la clave) se lee como `.google`, así
+/// que los perfiles existentes siguen funcionando sin migrar nada.
 public struct ProfileDescriptor: Codable, Sendable, Equatable {
     public let id: ProfileID
     public var displayName: String
-    /// `nil` mientras no haya login completado ("pendiente de iniciar sesión").
+    public var provider: CloudProvider
+    /// Google: `nil` mientras no haya login completado ("pendiente de iniciar sesión").
     public var issuer: OidcIssuer?
+    /// Azure: tenant de la sesión `az` con la que se conectó (claim `tid`);
+    /// `nil` sin conectar. No es secreto, pero tampoco se registra en logs.
+    public var homeTenantID: String?
+    /// Azure: cuenta de la sesión `az` (claim `oid`, estable). Con el tenant
+    /// identifica la sesión del perfil; nunca se guarda el UPN completo.
+    public var azureObjectID: String?
     /// Cuenta enmascarada (`a…@example.com`) o identidad workforce redactada.
-    /// Nunca el email completo ni el `principal://` crudo.
+    /// Nunca el email/UPN completo ni el `principal://` crudo.
     public var redactedAccount: String?
     public var lastUsedAt: Date?
 
-    public init(id: ProfileID, displayName: String, issuer: OidcIssuer? = nil, redactedAccount: String? = nil, lastUsedAt: Date? = nil) {
+    public init(
+        id: ProfileID, displayName: String, provider: CloudProvider = .google, issuer: OidcIssuer? = nil,
+        homeTenantID: String? = nil, azureObjectID: String? = nil, redactedAccount: String? = nil, lastUsedAt: Date? = nil
+    ) {
         self.id = id
         self.displayName = displayName
+        self.provider = provider
         self.issuer = issuer
+        self.homeTenantID = homeTenantID
+        self.azureObjectID = azureObjectID
         self.redactedAccount = redactedAccount
         self.lastUsedAt = lastUsedAt
     }
 
-    public var isSignedIn: Bool { issuer != nil }
+    enum CodingKeys: String, CodingKey {
+        case id, displayName, provider, issuer, homeTenantID, azureObjectID, redactedAccount, lastUsedAt
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(ProfileID.self, forKey: .id)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        // Sin clave = índice anterior a GH-88 = Google. Un valor desconocido
+        // (índice de un build más nuevo) SÍ falla: no se adivina la nube.
+        provider = try container.decodeIfPresent(CloudProvider.self, forKey: .provider) ?? .google
+        issuer = try container.decodeIfPresent(OidcIssuer.self, forKey: .issuer)
+        homeTenantID = try container.decodeIfPresent(String.self, forKey: .homeTenantID)
+        azureObjectID = try container.decodeIfPresent(String.self, forKey: .azureObjectID)
+        redactedAccount = try container.decodeIfPresent(String.self, forKey: .redactedAccount)
+        lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+    }
+
+    public var isSignedIn: Bool {
+        switch provider {
+        case .google: issuer != nil
+        case .azure: homeTenantID != nil && azureObjectID != nil
+        }
+    }
 
     /// Cuenta para el índice: Gaia → `a…@dominio`; STS → identidad workforce redactada.
     public static func redactedAccount(issuer: OidcIssuer, account: String) -> String {
         switch issuer {
         case .gaia:
-            guard let first = account.first, account.contains("@") else { return "<redacted>" }
-            return "\(first)…\(LogRedaction.emailDomain(account))"
+            return maskedEmail(account)
         case .sts:
             return WorkforceIdentity(principal: account).map { "\($0.pool): \($0.redactedSubject)" } ?? "<redacted>"
         }
+    }
+
+    /// Cuenta Azure para el índice: el UPN (`preferred_username`) enmascarado
+    /// como un email Gaia. Un invitado B2B (`ada_corp.com#EXT#@fabrikam…`)
+    /// queda `a…@fabrikam…`: ni el nombre ni el dominio de origen.
+    public static func redactedAccount(azureUsername: String) -> String {
+        maskedEmail(azureUsername)
+    }
+
+    private static func maskedEmail(_ account: String) -> String {
+        guard let first = account.first, account.contains("@") else { return "<redacted>" }
+        return "\(first)…\(LogRedaction.emailDomain(account))"
     }
 }
 
@@ -78,6 +136,12 @@ public enum ProfileError: Error, Sendable, Equatable {
 /// Sendable`: `UserDefaults` es thread-safe.
 public struct ProfileStore: @unchecked Sendable {
     public static let defaultsKey = "profiles.index"
+    /// GH-88: versión del formato del índice (ausente = 1, sin `provider`).
+    public static let schemaKey = "profiles.index.schema"
+    public static let currentSchema = 2
+    /// Copia del índice ilegible antes de sobrescribirlo (p. ej. un índice de
+    /// un build más nuevo con una nube que este no conoce): no se pierde.
+    public static let unreadableBackupKey = "profiles.index.unreadable-backup"
     static let log = Logger(subsystem: "com.iapdesktop.mac", category: "profiles")
 
     private let defaults: UserDefaults
@@ -120,7 +184,44 @@ public struct ProfileStore: @unchecked Sendable {
     }
 
     private func save(_ profiles: [ProfileDescriptor]) throws {
+        if let existing = defaults.data(forKey: Self.defaultsKey),
+           (try? JSONDecoder().decode([ProfileDescriptor].self, from: existing)) == nil {
+            defaults.set(existing, forKey: Self.unreadableBackupKey)
+            Self.log.error("profiles index unreadable; backed up before overwrite")
+        }
         defaults.set(try JSONEncoder().encode(profiles), forKey: Self.defaultsKey)
+        defaults.set(Self.currentSchema, forKey: Self.schemaKey)
+    }
+
+    public enum UpgradeOutcome: Sendable, Equatable {
+        case alreadyCurrent
+        /// Índice reescrito con `provider` explícito (todas las entradas antiguas → `.google`).
+        case upgraded(profiles: Int)
+        /// Índice ilegible: no se toca ni se marca (se reintenta al arrancar).
+        case skippedUnreadable
+    }
+
+    /// GH-88: reescribe un índice v1 con `provider` explícito. Idempotente;
+    /// verifica leyendo de vuelta antes de marcar la versión, y nunca toca
+    /// Keychain ni suites (los nombres de los perfiles Google no cambian).
+    @discardableResult
+    public func upgradeIndexIfNeeded() -> UpgradeOutcome {
+        guard defaults.integer(forKey: Self.schemaKey) < Self.currentSchema else { return .alreadyCurrent }
+        guard let data = defaults.data(forKey: Self.defaultsKey) else {
+            defaults.set(Self.currentSchema, forKey: Self.schemaKey)
+            return .upgraded(profiles: 0)
+        }
+        guard let profiles = try? JSONDecoder().decode([ProfileDescriptor].self, from: data),
+              let upgraded = try? JSONEncoder().encode(profiles),
+              (try? JSONDecoder().decode([ProfileDescriptor].self, from: upgraded)) == profiles
+        else {
+            Self.log.error("profiles index upgrade skipped: unreadable")
+            return .skippedUnreadable
+        }
+        defaults.set(upgraded, forKey: Self.defaultsKey)
+        defaults.set(Self.currentSchema, forKey: Self.schemaKey)
+        Self.log.notice("profiles index upgraded schema=\(Self.currentSchema, privacy: .public) count=\(profiles.count, privacy: .public)")
+        return .upgraded(profiles: profiles.count)
     }
 
     // MARK: - Namespacing (REQ-MT-3)

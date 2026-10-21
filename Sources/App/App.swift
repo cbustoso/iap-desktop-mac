@@ -35,7 +35,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // modo snapshot no se toca Keychain: perfil legado sin restaurar.
         let snapshot = ProcessInfo.processInfo.environment["IAP_SNAPSHOT"] != nil
         let migrator = ProfileMigrator()
-        if !snapshot { migrator.migrateLegacySingleProfileIfNeeded() }
+        if !snapshot {
+            migrator.migrateLegacySingleProfileIfNeeded()
+            // GH-88: índice v1 → `provider` explícito (perfiles existentes = Google).
+            ProfileStore().upgradeIndexIfNeeded()
+        }
         coordinator = ProfileCoordinator(migrationCompleted: !snapshot && migrator.isCompleted)
         coordinator.activate(snapshot ? .legacyDefault : coordinator.initialProfile)
         app.activate()

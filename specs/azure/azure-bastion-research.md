@@ -21,7 +21,8 @@ Convención de este documento:
 
 ## 0. Resumen ejecutivo
 
-1. **Auth**: Entra ID con *authorization code + PKCE* y redirect loopback `http://localhost`
+1. **Auth** *(histórico: sustituido por la decisión de §0.1, auth solo con `az login`)*:
+   Entra ID con *authorization code + PKCE* y redirect loopback `http://localhost`
    (encaja 1:1 con `AuthorizeURL`/`PKCE`/`LoopbackReceiver` existentes). App registration
    **multi-tenant propia** (no reutilizar el client ID del Azure CLI), *public client*, sin secreto.
    Scope ARM + `offline_access`. Device code solo como fallback opcional: muchas organizaciones
@@ -46,7 +47,7 @@ Convención de este documento:
    macOS** — Microsoft solo lo permite con `az network bastion rdp` (Windows-only) y desde PCs
    Windows 10+ unidos/registrados en el mismo directorio (§3.6). Desde Mac: credenciales
    locales/dominio en la VM, o un jump host Windows unido a Entra.
-7. **Plan**: spike de protocolo en Swift contra un Bastion real (F0) → auth Entra + árbol
+7. **Plan**: spike de protocolo en Swift contra un Bastion real (F0) → auth (`az login`, §0.1) + árbol
    (F1) → `BastionTunnel` nativo con SSH/SFTP/RDP (F2) → endurecimiento (F3). Plan de
    implementación detallado en §9; equivalencias Swift ↔ `az` en §10.
    Precedente comercial casi idéntico en macOS (TYO Reach, §8).
@@ -54,9 +55,42 @@ Convención de este documento:
 Veredicto global: **GO** con la Ruta 1, condicionado a que F0 pase sus criterios de aceptación
 (detalle en §6.4).
 
+### 0.1 Decisión del dueño (2026-10-20): autenticación SOLO con la sesión `az login`
+
+Esta decisión **reemplaza** el plan de autenticación de §1 y §9.1, que queda como **histórico**
+(se conserva por trazabilidad, no se implementa):
+
+- **Sin app registration propia**: no hay flujo PKCE ni device code, ni `client_id` por variable
+  de entorno, ni consentimiento de admin por tenant.
+- **Único origen de credenciales**: la sesión local de Azure CLI. El sistema obtiene los tokens
+  ARM con `az account get-access-token --resource https://management.core.windows.net/
+  [--tenant <id>] --output json` y los cachea **en memoria** por tenant hasta `expires_on`
+  (≈ 1 h). `az account list` aporta suscripciones, tenants y la cuenta activa.
+- **Requisito**: Azure CLI instalado y con `az login` hecho. Si falta `az` o la sesión, la app
+  lo detecta (`which az` + `az account list`) y da instrucciones accionables (instalar con
+  Homebrew, ejecutar `az login` / `az login --tenant <id>`); nunca falla en silencio.
+- **Nada en disco ni en Keychain**: la app no guarda tokens ni refresh tokens (los custodia el
+  propio `az`). El aislamiento de credenciales por perfil de §1.5 deja de aplicar a Azure; un
+  perfil Azure solo guarda metadata no sensible: tenant y `oid` de la cuenta de la sesión `az`
+  (y el UPN enmascarado), para detectar si `az` pasa a otra cuenta.
+- **Invocación de `az`**: con timeout, sin stdin, parseando **solo stdout JSON**; stderr solo se
+  usa para clasificar el error (AADSTS) y nunca se muestra ni se registra; jamás se loguean tokens.
+- **Descubrimiento** (§2): `az account list` + ARM REST (`GET /tenants`, `/subscriptions`, VMs,
+  NICs, `bastionHosts`) con el token de `az`.
+- **El túnel sigue siendo nativo en Swift** (Ruta 1, §3.4): solo cambia el origen del `aztoken`.
+  La Ruta 2 (delegar el túnel en `az network bastion tunnel`, §3.5) sigue sin implementarse.
+- **Audiencia**: la de §1.3 (`management.core.windows.net`), que es la que usa el CLI; validar
+  en el spike F0 (#86) que Bastion acepta el token de `--resource https://management.core.windows.net/`.
+- **Criterios de F1 afectados** (§9.6): A1.1–A1.4 se reformulan en términos de la sesión `az`
+  (A1.1: con una sesión `az` de 2 tenants se ven ambos tenants y sus suscripciones; A1.2: sin `az`
+  o sin sesión, mensaje accionable; A1.3: un perfil detecta que `az` cambió de cuenta; A1.4:
+  la app no escribe credenciales Azure en disco ni Keychain).
+
 ---
 
 ## 1. (a) Autenticación Entra ID para app nativa macOS
+
+> **Histórico** — sustituido por §0.1 (auth solo con `az login`). Se conserva como referencia.
 
 ### 1.1 Authorization code + PKCE vs device code
 
@@ -903,6 +937,9 @@ Módulos nuevos: `AzureClient` (ARM) y `BastionKit` (túnel), más cambios acota
 repo. Estos bocetos no son código de producción.
 
 ### 9.1 AzureAuth (AuthKit)
+
+> **Histórico** — sustituido por §0.1. Implementado en su lugar: `AzCliTokenSource` +
+> `AzureCredentialFacade` (solo `az`) en `Sources/AuthKit/`.
 
 **App registration** (una vez, por el dueño o por cada organización; el repo no lleva client ID):
 
