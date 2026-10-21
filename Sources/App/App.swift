@@ -46,7 +46,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapshotIfRequested()
     }
 
-    private var front: ProfileSession? { coordinator?.frontSession }
+    private var front: (any ProfileSessionHosting)? { coordinator?.frontSession }
 
     nonisolated static func isValidProjectID(_ id: String) -> Bool {
         guard (6...30).contains(id.count) else { return false }
@@ -89,7 +89,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case "dark": NSApplication.shared.appearance = NSAppearance(named: .darkAqua)
         default: break
         }
-        if let id = env["IAP_SNAPSHOT_SELECT"] { session.windowController?.selectNode(id: id) }
+        if let id = env["IAP_SNAPSHOT_SELECT"] { (session as? ProfileSession)?.windowController?.selectNode(id: id) }
         // IAP_SNAPSHOT_LOGIN=1 captura la ventana Sign In en vez de la principal.
         let target: NSWindow? = env["IAP_SNAPSHOT_LOGIN"] == "1"
             ? { session.showLoginWindow(nil); return session.loginWindow }()
@@ -243,7 +243,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     ) -> [NSMenuItem] {
         profiles.map { profile in
             let account = profile.redactedAccount ?? "sin sesión"
-            let item = NSMenuItem(title: "\(profile.displayName) — \(account)", action: action, keyEquivalent: "")
+            let cloud = profile.provider == .azure ? " (Azure)" : ""
+            let item = NSMenuItem(title: "\(profile.displayName)\(cloud) — \(account)", action: action, keyEquivalent: "")
             item.target = target
             item.representedObject = profile.id.rawValue
             item.state = profile.id == front ? .on : (open.contains(profile.id) ? .mixed : .off)
@@ -256,17 +257,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         coordinator.activate(id)
     }
 
+    /// Nubes del alta de perfil, en el orden del selector (GH-91).
+    static let addProfileProviders: [(provider: CloudProvider, title: String)] = [
+        (.google, "Google Cloud (cuenta Google)"),
+        (.azure, "Microsoft Azure (sesión az login)"),
+    ]
+
     @objc private func addProfile(_ sender: Any?) {
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 30, width: 280, height: 24))
         field.placeholderString = "Nombre del perfil (p. ej. Cliente A)"
+        let cloud = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 280, height: 26), pullsDown: false)
+        cloud.addItems(withTitles: Self.addProfileProviders.map(\.title))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 54))
+        accessory.addSubview(field)
+        accessory.addSubview(cloud)
         let alert = NSAlert()
         alert.messageText = "Add profile"
-        alert.informativeText = "Cada perfil tiene su propia cuenta, client OAuth, proyectos y Keychain."
-        alert.accessoryView = field
+        alert.informativeText = "Cada perfil tiene su propia cuenta, proyectos y settings. "
+            + "Google usa tu client OAuth y Keychain; Azure usa la sesión de Azure CLI (az login)."
+        alert.accessoryView = accessory
         alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        coordinator.createProfile(named: field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+        let provider = Self.addProfileProviders[max(0, cloud.indexOfSelectedItem)].provider
+        coordinator.createProfile(named: field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), provider: provider)
     }
 
     @objc private func removeProfile(_ sender: NSMenuItem) {

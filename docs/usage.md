@@ -470,11 +470,11 @@ o compromete, seguir el procedimiento oficial de rotación de claves de Sparkle.
 
 ## 13. Azure: VMs vía Azure Bastion (GH-84, en desarrollo)
 
-> **Estado actual**: en desarrollo y **sin UI todavía**. Ya están la autenticación
-> con la sesión `az login` (`AuthKit`: `AzCliTokenSource`, `AzureCredentialFacade`)
-> y el descubrimiento ARM (`AzureClient`); el árbol Azure en el Explorer
-> (#91/#92) y el túnel Bastion (F2) aún no. La app sigue tratando todos los
-> perfiles como Google. Diseño completo en [`specs/azure/`](../specs/azure/):
+> **Estado actual**: en desarrollo. Ya hay perfiles Azure (#91) con la
+> autenticación de la sesión `az login` (`AuthKit`: `AzCliTokenSource`,
+> `AzureCredentialFacade`) y la elección de tenant/suscripción activos; el
+> árbol de VMs en el Explorer (#92) y el túnel Bastion (F2) aún no. Diseño
+> completo en [`specs/azure/`](../specs/azure/):
 > [`requirements.md`](../specs/azure/requirements.md),
 > [`design.md`](../specs/azure/design.md), [`tasks.md`](../specs/azure/tasks.md) y
 > la investigación [`azure-bastion-research.md`](../specs/azure/azure-bastion-research.md)
@@ -508,7 +508,24 @@ az account list --output table # comprueba qué ve la sesión
   (`az login --tenant <id>`), `az` que no responde a tiempo, o cuenta distinta
   a la del perfil.
 
-### 13.2 Cómo se detectan cuentas, tenants y suscripciones
+### 13.2 Crear un perfil Azure y elegir suscripción
+
+1. **Profiles → Add profile…**, nombre y nube **Microsoft Azure (sesión az
+   login)**. Los perfiles Google existentes no cambian.
+2. Al abrirse (o al arrancar la app con ese perfil), la ventana detecta `az`:
+   - sin `az` o sin sesión: estado vacío **«Instala Azure CLI y ejecuta az
+     login»** con los comandos, **Abrir Terminal**, **Copiar comandos** y
+     **Reintentar** (volver a la app tras `az login` también reintenta). No se
+     muestran datos de ejemplo;
+   - con sesión: el perfil queda ligado a esa cuenta (tenant + `oid`) y lista
+     los tenants y suscripciones de la sesión.
+3. Selecciona un tenant o una suscripción y pulsa **Usar selección** (o doble
+   clic). La elección se guarda en el perfil; si deja de existir, se usa la
+   suscripción por defecto de `az`.
+4. **Sign Out** desliga la cuenta del perfil (sin `az logout`); **Refresh**
+   (⌘R) vuelve a leer la sesión `az`.
+
+### 13.3 Cómo se detectan cuentas, tenants y suscripciones
 
 1. **Cuenta y tenants**: `az account list --output json` da la cuenta activa y
    los tenants/suscripciones que conoce la sesión. Se completa con ARM
@@ -527,7 +544,7 @@ az account list --output table # comprueba qué ve la sesión
 Un fallo en un tenant o suscripción (permisos, MFA pendiente) se marca en ese
 nodo y no impide cargar el resto.
 
-### 13.3 Cómo se abrirá el túnel
+### 13.4 Cómo se abrirá el túnel
 
 > **No implementado todavía** (fase F2). El protocolo se está validando en el
 > spike F0 (#86).
@@ -545,7 +562,7 @@ delegar en `az network bastion tunnel`:
 Salida de red necesaria: `{dnsName}` del Bastion y `management.azure.com`,
 ambos por 443.
 
-### 13.4 Roles RBAC necesarios
+### 13.5 Roles RBAC necesarios
 
 Para conectar con native client, la cuenta de `az` necesita como mínimo
 (ver research §2.1):
@@ -562,7 +579,7 @@ Para conectar con native client, la cuenta de `az` necesita como mínimo
 - Estos roles permiten llegar a la VM, no iniciar sesión en ella: el login
   SSH/RDP usa las credenciales del sistema operativo de la VM.
 
-### 13.5 SKU del Bastion: Standard o superior con native client
+### 13.6 SKU del Bastion: Standard o superior con native client
 
 La app solo puede conectar a través de un Bastion **Standard o Premium** con
 **Native Client Support** activado (`enableTunneling = true`). En el portal:
@@ -578,7 +595,7 @@ La app solo puede conectar a través de un Bastion **Standard o Premium** con
 Un Bastion Basic o Developer aparecerá en el árbol, pero sin opción de
 conectar ("SKU sin native client: actualizar a Standard").
 
-### 13.6 Costo aproximado de Bastion
+### 13.7 Costo aproximado de Bastion
 
 Precios pay-as-you-go en `eastus` (Azure Retail Prices API, consultada
 2026-10-20; research §6.2). Varían por región y en el tiempo; consulta la
@@ -598,7 +615,7 @@ antes de desplegar.
 - Un mismo Bastion da servicio a las VMs de su VNet y de las VNets *peered*, así
   que lo habitual es uno por VNet hub (≈ 212 USD/mes en Standard).
 
-### 13.7 Limitación: RDP con Entra ID no funciona desde macOS
+### 13.8 Limitación: RDP con Entra ID no funciona desde macOS
 
 Microsoft solo permite RDP con **Entra ID** a través de Bastion native client
 desde PCs **Windows 10+** registrados o unidos a Entra en el mismo directorio que

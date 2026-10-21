@@ -58,7 +58,7 @@ let package = Package(
             dependencies: [
                 "AuthKit", "GCPClient", "TunnelKit", "SSHKit",
                 "TerminalUI", "SFTPKit", "RDPBridge", "SettingsStore",
-                "ExplorerUI",
+                "ExplorerUI", "AzureClient",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
             linkerSettings: [
@@ -108,6 +108,6 @@ let package = Package(
                 "ExplorerUI",
                 .product(name: "SwiftTerm", package: "SwiftTerm"),
             ]),
-        .testTarget(name: "AppTests", dependencies: ["App"]),
+        .testTarget(name: "AppTests", dependencies: ["App", "AuthKit", "AzureClient"]),
     ]
 )

@@ -15,8 +15,9 @@ import TunnelKit
 /// (ni `static` mutable). La lógica interna de SSH/RDP/SFTP/GCP no cambia:
 /// solo se instancia una vez por perfil.
 @MainActor
-final class ProfileSession: NSObject {
+final class ProfileSession: NSObject, ProfileSessionHosting {
     let id: ProfileID
+    let provider = CloudProvider.google
     let environment: ProfileEnvironment
     private(set) var descriptor: ProfileDescriptor
     let credentialFacade: CredentialFacade
@@ -26,7 +27,7 @@ final class ProfileSession: NSObject {
     /// El coordinador actualiza el índice (issuer/cuenta redactada/último uso).
     var onAccountChanged: (@MainActor (ProfileSession, OfflineCredential?) -> Void)?
     /// La ventana se cerró (tras limpiar sus pestañas): el coordinador lo libera.
-    var onWindowClosed: (@MainActor (ProfileSession) -> Void)?
+    var onWindowClosed: (@MainActor (any ProfileSessionHosting) -> Void)?
     /// ¿Hay más de un perfil? Entonces la status bar antepone el nombre del perfil.
     var showsProfileName: @MainActor () -> Bool = { false }
 
