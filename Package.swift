@@ -50,6 +50,20 @@ let package = Package(
         // Framing SFTP v3 propio sobre la SshSession ya autenticada (GH-55,
         // specs/sftp/transport-decision.md): sin dependencia externa nueva.
         .target(name: "SFTPKit", dependencies: ["SSHKit"]),
+        // GH-93/94: túnel nativo a Azure Bastion (specs/azure/design.md). SSHKit
+        // por `SshByteStream`/`SshSession` (SSH in-process); RDPBridge porque el
+        // forwarder es un `RdpTunnel` del conector fallback existente.
+        .target(
+            name: "BastionKit",
+            dependencies: [
+                "TunnelKit",  // ProxyConfig, TunnelError, filtro loopback de IapListener
+                "SSHKit",
+                "RDPBridge",
+                .product(name: "WebSocketKit", package: "websocket-kit"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+            ]),
         .target(name: "RDPBridge"),
         .target(name: "SettingsStore"),
         .target(name: "ExplorerUI", dependencies: ["GCPClient"]),
@@ -84,6 +98,20 @@ let package = Package(
                 "SSHKit",
                 "TunnelKit",
                 "IAPTestSupport",
+                .product(name: "NIOSSH", package: "swift-nio-ssh"),
+            ]),
+        .testTarget(
+            name: "BastionKitTests",
+            dependencies: [
+                "BastionKit",
+                "SSHKit",
+                "TunnelKit",
+                "RDPBridge",
+                "IAPTestSupport",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+                .product(name: "NIOHTTP1", package: "swift-nio"),
+                .product(name: "NIOWebSocket", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ]),
         .testTarget(name: "GCPClientTests", dependencies: ["GCPClient"]),
