@@ -87,10 +87,36 @@ Detalle completo del toolchain, troubleshooting y generación de capturas
 
 ## Instalación (`.app` sin firmar)
 
+Bundle **debug** (local, sin clave):
+
 ```bash
+tools/make-app-bundle.sh            # = debug
+open dist/IAPDesktopMac.app
+```
+
+Sin `SPARKLE_PUBLIC_ED_KEY` el script solo avisa y el bundle queda con el
+actualizador (Sparkle) deshabilitado.
+
+Bundle **release**: exige `SPARKLE_PUBLIC_ED_KEY`, la clave pública EdDSA
+(Ed25519, base64 de 32 bytes) que se inyecta como `SUPublicEDKey` en el
+`Info.plist` del `.app` generado. Sin ella el script falla con
+`ERROR: falta SPARKLE_PUBLIC_ED_KEY para un bundle release actualizable`, y si
+no decodifica a 32 bytes, con `ERROR: SPARKLE_PUBLIC_ED_KEY no es una clave
+Ed25519 base64 de 32 bytes`.
+
+```bash
+export SPARKLE_PUBLIC_ED_KEY='base64-de-la-clave-publica'
 tools/make-app-bundle.sh release
 open dist/IAPDesktopMac.app
 ```
+
+El par lo genera una sola vez el dueño con `generate_keys` de Sparkle
+(`.build/artifacts/sparkle/Sparkle/bin/generate_keys`). La pública se guarda
+como GitHub Secret `SPARKLE_PUBLIC_ED_KEY` (no es secreta, pero debe
+corresponder a la privada). La **privada** solo vive en la máquina del dueño
+(y como secret `SPARKLE_PRIVATE_KEY` para firmar el appcast): nunca entra al
+bundle ni al repo. Procedimiento completo en
+[`docs/usage.md` §12](docs/usage.md#12-auto-actualización-con-sparkle-gh-83).
 
 El bundle no está firmado ni notarizado por defecto (ver
 `tools/sign-and-notarize.sh` para firmarlo con un certificado Developer ID
