@@ -42,18 +42,25 @@ public final class BastionLocalForwarder: RdpTunnel {
 
     public var statistics: Statistics { state.statistics }
 
+    /// GH-95: cada túnel que no se pudo abrir o que cayó (WebSocket perdido,
+    /// renovación agotada…), con su error tipado, para avisar en la UI. El
+    /// cliente TCP (Windows App) solo ve un reset de la conexión.
+    public func failures() -> AsyncStream<BastionTunnelError> { state.subscribeFailures() }
+
     /// Reenvía hacia `factory.target`; `stop()` borra la sesión pendiente.
-    public static func start(factory: BastionTunnelFactory) async throws -> BastionLocalForwarder {
-        try await start(streamFactory: { try await factory.openStream() }, onStop: { await factory.shutdown() })
+    /// `listenPort` 0 = efímero (lo normal); fijo solo para herramientas como `bastion-check`.
+    public static func start(factory: BastionTunnelFactory, listenPort: UInt16 = 0) async throws -> BastionLocalForwarder {
+        try await start(
+            streamFactory: { try await factory.openStream() }, onStop: { await factory.shutdown() }, listenPort: listenPort)
     }
 
     public static func start(
-        streamFactory: @escaping StreamFactory, onStop: @escaping @Sendable () async -> Void = {}
+        streamFactory: @escaping StreamFactory, onStop: @escaping @Sendable () async -> Void = {}, listenPort: UInt16 = 0
     ) async throws -> BastionLocalForwarder {
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true  // como el CLI (TCP_NODELAY)
         let parameters = NWParameters(tls: nil, tcp: tcp)
-        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: 0)
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: listenPort) ?? .any)
         let listener: NWListener
         do {
             listener = try NWListener(using: parameters)
@@ -101,6 +108,7 @@ public final class BastionLocalForwarder: RdpTunnel {
         listener.cancel()
         for task in state.cancelAll() { await task.value }
         await onStop()
+        state.finishFailures()
     }
 
     public func close() async { await stop() }
@@ -115,11 +123,9 @@ public final class BastionLocalForwarder: RdpTunnel {
         do {
             stream = try await factory()
         } catch {
-            state.update {
-                $0.failedConnections += 1
-                $0.lastError = error as? BastionTunnelError
-            }
-            connection.cancel()  // sin túnel: el cliente ve el cierre
+            state.update { $0.failedConnections += 1 }
+            state.fail(BastionTunnelError(error))
+            connection.forceCancel()  // sin túnel: el cliente ve un reset, no un cierre limpio
             return
         }
         await withTaskGroup(of: Void.self) { group in
@@ -137,13 +143,19 @@ public final class BastionLocalForwarder: RdpTunnel {
                     state.update { $0.bytesDown += UInt64(data.count) }
                     guard await send(data, over: connection) else { break }
                 }
-                connection.cancel()
+                // WebSocket caído: reset inmediato (desbloquea el `receive` del
+                // otro sentido) en vez de dejar el TCP abierto sin destino.
+                if await stream.terminationError != nil {
+                    connection.forceCancel()
+                } else {
+                    connection.cancel()
+                }
             }
         }
         await stream.close()
         connection.cancel()
         if let failure = await stream.terminationError {
-            state.update { $0.lastError = failure }
+            state.fail(failure)
         }
     }
 
@@ -180,8 +192,31 @@ private final class ForwarderState: @unchecked Sendable {
     private let lock = NSLock()
     private var stats = BastionLocalForwarder.Statistics()
     private var running: [(task: Task<Void, Never>, connection: NWConnection)] = []
+    private var failureSubscribers: [AsyncStream<BastionTunnelError>.Continuation] = []
 
     var statistics: BastionLocalForwarder.Statistics { lock.withLock { stats } }
+
+    func subscribeFailures() -> AsyncStream<BastionTunnelError> {
+        let (stream, continuation) = AsyncStream<BastionTunnelError>.makeStream()
+        lock.withLock { failureSubscribers.append(continuation) }
+        return stream
+    }
+
+    func fail(_ error: BastionTunnelError) {
+        let subscribers = lock.withLock { () -> [AsyncStream<BastionTunnelError>.Continuation] in
+            stats.lastError = error
+            return failureSubscribers
+        }
+        subscribers.forEach { $0.yield(error) }
+    }
+
+    func finishFailures() {
+        let subscribers = lock.withLock { () -> [AsyncStream<BastionTunnelError>.Continuation] in
+            defer { failureSubscribers.removeAll() }
+            return failureSubscribers
+        }
+        subscribers.forEach { $0.finish() }
+    }
 
     func update(_ body: (inout BastionLocalForwarder.Statistics) -> Void) {
         lock.withLock { body(&stats) }

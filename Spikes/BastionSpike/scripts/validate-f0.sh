@@ -1,20 +1,42 @@
 #!/bin/sh
 # GH-86 (F0): validación semiautomática A0.2 / A0.4 / A0.6 contra un Bastion real.
 # Uso:
-#   scripts/validate-f0.sh <subscription> <resource-group> <bastion> <vm> [usuario-ssh]
+#   scripts/validate-f0.sh [--usar-bastionkit] <subscription> <resource-group> <bastion> <vm> [usuario-ssh]
+#
+# --usar-bastionkit (GH-95): en vez del spike, ejecuta `bastion-check` del
+# Package.swift raíz, que monta el túnel con el código de PRODUCCIÓN
+# (BastionKit + AzureClient + AzCliTokenSource, proxy del sistema y
+# renovación). Mismas opciones y mismas líneas de log: el resto del script no
+# cambia, así la batería e2e pre-release (REQ-AZ-10) valida lo que se publica.
+#
+# Variables: SPIKE_PORT, AZ_PORT, y HOLD_SECS (con usuario SSH: mantiene una
+# sesión SSH ociosa ese tiempo para validar keepalive/pings y sesiones largas).
+#
 # Requiere `az login` hecho. No imprime tokens: comprueba que tampoco estén en el log.
 set -eu
 cd "$(dirname "$0")/.."
 
+USE_BASTIONKIT=0
+if [ "${1:-}" = "--usar-bastionkit" ]; then USE_BASTIONKIT=1; shift; fi
+
 SUB="$1"; RG="$2"; BASTION="$3"; VM="$4"; SSH_USER="${5:-}"
 SPIKE_PORT="${SPIKE_PORT:-50022}"
 AZ_PORT="${AZ_PORT:-50023}"
+HOLD_SECS="${HOLD_SECS:-0}"
 OUT="$(mktemp -d /tmp/bastion-f0.XXXXXX)"
 LOG="$OUT/spike.log"
 echo "Logs en $OUT"
 
-swift build -c release >/dev/null
-BIN="$(swift build -c release --show-bin-path)/bastion-spike"
+if [ "$USE_BASTIONKIT" = 1 ]; then
+    echo "== Implementación: BastionKit (bastion-check, código de producción)"
+    ROOT="$(cd ../.. && pwd)"
+    swift build --package-path "$ROOT" -c release --product bastion-check >/dev/null
+    BIN="$(swift build --package-path "$ROOT" -c release --show-bin-path)/bastion-check"
+else
+    echo "== Implementación: spike F0 (bastion-spike)"
+    swift build -c release >/dev/null
+    BIN="$(swift build -c release --show-bin-path)/bastion-spike"
+fi
 
 wait_port() {
     i=0
@@ -44,6 +66,16 @@ if [ -n "$SSH_USER" ]; then
     echo "== A0.2 ssh real (BatchMode: necesita tu clave en la VM)"
     ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OUT/known_hosts" \
         -p "$SPIKE_PORT" "$SSH_USER@127.0.0.1" 'echo ssh-ok; uname -a' || echo "FALLO ssh"
+fi
+
+if [ -n "$SSH_USER" ] && [ "$HOLD_SECS" -gt 0 ]; then
+    echo "== F3 sesión larga: SSH ocioso ${HOLD_SECS}s (keepalive/pings; R10)"
+    if ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OUT/known_hosts" \
+        -p "$SPIKE_PORT" "$SSH_USER@127.0.0.1" "sleep $HOLD_SECS; echo sigue-viva"; then
+        echo "OK sesión larga"
+    else
+        echo "FALLO sesión larga (ver 'túnel caído' en $LOG)"
+    fi
 fi
 
 echo "== Contraste con az network bastion tunnel"

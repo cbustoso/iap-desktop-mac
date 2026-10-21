@@ -470,10 +470,11 @@ o compromete, seguir el procedimiento oficial de rotación de claves de Sparkle.
 
 ## 13. Azure: VMs vía Azure Bastion (GH-84, en desarrollo)
 
-> **Estado actual**: en desarrollo. Ya hay perfiles Azure (#91) con la
+> **Estado actual**: en desarrollo. Hay perfiles Azure (#91) con la
 > autenticación de la sesión `az login` (`AuthKit`: `AzCliTokenSource`,
-> `AzureCredentialFacade`) y la elección de tenant/suscripción activos; el
-> árbol de VMs en el Explorer (#92) y el túnel Bastion (F2) aún no. Diseño
+> `AzureCredentialFacade`), elección de tenant/suscripción, nodos Azure en el
+> Explorer (#92) y el túnel nativo en `BastionKit` (#93/#94) con proxy,
+> renovación de sesión y errores tipados (#95). Diseño
 > completo en [`specs/azure/`](../specs/azure/):
 > [`requirements.md`](../specs/azure/requirements.md),
 > [`design.md`](../specs/azure/design.md), [`tasks.md`](../specs/azure/tasks.md) y
@@ -544,23 +545,33 @@ az account list --output table # comprueba qué ve la sesión
 Un fallo en un tenant o suscripción (permisos, MFA pendiente) se marca en ese
 nodo y no impide cargar el resto.
 
-### 13.4 Cómo se abrirá el túnel
+### 13.4 Cómo se abre el túnel
 
-> **No implementado todavía** (fase F2). El protocolo se está validando en el
-> spike F0 (#86).
-
-El plan (research §3.3–3.4, ruta 1) es un túnel **nativo en Swift**, sin
+Túnel **nativo en Swift** (`BastionKit`, research §3.3–3.4, ruta 1), sin
 delegar en `az network bastion tunnel`:
 
 1. ARM solo se usa para **leer** el Bastion (`dnsName`, SKU, `enableTunneling`);
    no hay ninguna llamada ARM que "abra" el túnel.
 2. Por cada conexión TCP, la app pide un token de sesión al plano de datos del
-   Bastion (`POST https://{dnsName}/api/tokens`, con el token ARM de `az`).
+   Bastion (`POST https://{dnsName}/api/tokens`, con el token ARM de `az`). A
+   partir de la segunda conexión, el POST **encadena** la sesión anterior
+   (`token` + cabecera `X-Node-Id`), como el CLI.
 3. Abre un WebSocket `wss://{dnsName}/webtunnelv2/…` (puerto 443) y reenvía por
-   él los bytes de SSH (puerto 22) o RDP (3389), igual que hoy con IAP.
+   él los bytes de SSH (puerto 22) o RDP (3389), igual que hoy con IAP. SSH y
+   SFTP van in-process; RDP pasa por un puerto local `127.0.0.1:{efímero}` al
+   que se conecta Windows App.
+4. Al cerrarse la última conexión (o el perfil), un **único**
+   `DELETE /api/tokens/{authToken}` borra la sesión (404 = ya no existía).
 
 Salida de red necesaria: `{dnsName}` del Bastion y `management.azure.com`,
 ambos por 443.
+
+**Proxy corporativo** (REQ-AZ-9): se usa el proxy del sistema con el mismo
+resolvedor que IAP (incluido PAC; si el PAC falla, conexión directa). El
+`POST`/`DELETE` van por `URLSession` con ese proxy y el WebSocket hace
+`HTTP CONNECT {dnsName}:443` a través de él. Proxies SOCKS no se usan (directo).
+Si el proxy rechaza el `CONNECT` (403, 407 con autenticación), el error es
+inmediato: «El proxy no permite la conexión WebSocket hacia el Bastion».
 
 ### 13.5 Roles RBAC necesarios
 
@@ -628,3 +639,82 @@ Alternativas:
   unido a Entra, desde el que se abre el RDP.
 
 SSH no tiene esta limitación con usuario/clave o llave de la VM.
+
+### 13.9 Renovación de sesión y desconexiones
+
+El protocolo del Bastion **no tiene reanudación** (sin SID/ACK, a diferencia del
+relay IAP de §10): un WebSocket caído es una conexión TCP muerta. La app:
+
+- **Renueva la sesión al abrir cada conexión.** Si el `POST /api/tokens`
+  devuelve 401/403, 429, 5xx, timeout o error de red, lo repite **encadenando la
+  misma sesión previa** (`token` + `X-Node-Id`) con backoff exponencial
+  (0,5 s → 1 s → … hasta 8 s) y como máximo **3 intentos**. Ante 401/403 pide
+  antes un token ARM nuevo a `az`. Ante 404 de una sesión encadenada (el Bastion
+  ya la olvidó) pide una sesión nueva sin encadenar.
+- **Reintenta el WebSocket** si su upgrade falla con un error reintentable (p.
+  ej. `websocketToken` caducado → 401): pide otro POST encadenado (el
+  `websocketToken` es de un solo uso) y vuelve a abrirlo, con el mismo backoff.
+- **No reintenta** lo que no se arregla repitiendo: SKU sin native client,
+  VM/Bastion inexistente (404 sin sesión previa), proxy que bloquea, respuesta
+  con formato desconocido. Si se agotan los intentos el error dice «Tras N
+  intentos: …» con el último motivo.
+- **Detecta cortes a mitad de sesión.** Un ping WebSocket cada 30 s; si no hay
+  pong antes del siguiente, el túnel se da por perdido (código 1006). Un cierre
+  sin Close 1000 también. En ambos casos la conexión termina **enseguida** con
+  `connectionLost` (sin quedarse colgada): la sesión SSH recibe el estado
+  `lost` con ese motivo y, en RDP, Windows App ve un reset de la conexión y
+  ofrece reconectar; el error tipado queda para la UI (`failures()` del forwarder). La siguiente
+  conexión pide una sesión nueva (encadenada si quedan otras abiertas).
+- **Cierra limpio**: sea cual sea el camino, un único `DELETE` cuando no queda
+  ninguna conexión.
+
+### 13.10 Troubleshooting del túnel
+
+| Mensaje | Causa probable | Qué hacer |
+|---|---|---|
+| «Azure rechazó el acceso al Bastion o a la VM…» | Falta **Reader** en VM/NIC/Bastion, o la sesión `az` es de otra cuenta | Revisar §13.5; `az account show`; `az login` |
+| «Tras 3 intentos: El Bastion devolvió HTTP 503/429» | Bastion saturado o en mantenimiento | Esperar y reintentar; ver *Resource health* del Bastion |
+| «El Bastion (SKU …) no admite el túnel nativo…» | SKU Basic/Developer o *Native client support* apagado | §13.6 |
+| «El Bastion no encuentra la VM o la sesión ya no existe.» | VM borrada/movida o ID incorrecto | Refrescar (⌘R) el árbol |
+| «El proxy no permite la conexión WebSocket hacia el Bastion.» | El proxy bloquea `CONNECT` a `*.bastion.azure.com:443` o exige autenticación | Pedir excepción para `{dnsName}:443`; el proxy con autenticación no está soportado |
+| «Se perdió la conexión con el Bastion (código 1006)…» | Sin respuesta a los pings: Wi‑Fi/VPN caída, suspensión del Mac, NAT que expiró | Volver a conectar; si se repite con red estable, ver *Diagnóstico* abajo |
+| «Se perdió la conexión con el Bastion.» (sin código) | El Bastion o un intermediario cortó el TCP | Volver a conectar; si pasa siempre a los ~60 min, es R10 (sesión larga) |
+| «El Bastion respondió de una forma no reconocida…» | Azure cambió la API no documentada | Abrir issue con el log (sin tokens) |
+
+**Diagnóstico (logs locales).** Los eventos del túnel se registran en OSLog,
+solo en tu Mac, sin tokens ni URLs del WebSocket (el nombre de la VM va como
+dato privado):
+
+```bash
+log stream --level debug --predicate 'subsystem == "com.iapdesktop.mac" && category == "azure.bastion"'
+# o, a posteriori:
+log show --last 1h --predicate 'subsystem == "com.iapdesktop.mac" && category == "azure.bastion"'
+```
+
+Se ven los POST (intento, encadenado o no), reintentos con su retardo y motivo,
+token ARM invalidado, fallos del WebSocket, túneles perdidos (con la clase de
+error) y el DELETE final.
+
+### 13.11 Validación contra un Bastion real (pre-release)
+
+La batería e2e (REQ-AZ-10) usa el script del spike, que puede ejecutar el
+**código de producción** en lugar del spike:
+
+```bash
+cd Spikes/BastionSpike
+scripts/validate-f0.sh --usar-bastionkit <subscription> <rg-del-bastion> <bastion> <vm> [usuario-ssh]
+HOLD_SECS=4000 scripts/validate-f0.sh --usar-bastionkit … <usuario-ssh>   # + sesión > 1 h (R10)
+```
+
+`--usar-bastionkit` compila `bastion-check` (producto del `Package.swift` raíz:
+`BastionKit` + `AzureClient` + `AzCliTokenSource`, con proxy del sistema y
+renovación) y comprueba lo mismo que con el spike: banner SSH, contraste con
+`az network bastion tunnel`, DELETE 200/204 y segundo DELETE 404, y que el log no
+contiene tokens. `bastion-check` también se puede usar a mano:
+
+```bash
+swift run bastion-check --subscription <id> --resource-group <rg> --bastion <b> --vm <vm> \
+  --port 22 --listen-port 50022 --verbose
+ssh -p 50022 usuario@127.0.0.1
+```
+

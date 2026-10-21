@@ -140,3 +140,14 @@ BIN=$(swift build -c release --show-bin-path)/bastion-spike
 - Resultado RDP con Windows App; puerto custom; comportamiento > 60 min.
 - Cualquier diferencia con §3.3 (headers extra exigidos, frames de texto,
   pings del servidor, tamaño máximo de frame).
+
+## Validar el código de producción (GH-95)
+
+`scripts/validate-f0.sh --usar-bastionkit …` ejecuta las mismas comprobaciones
+con `bastion-check`, un binario del `Package.swift` raíz que monta el túnel con
+`BastionKit` (proxy del sistema, renovación de sesión, errores tipados) en vez
+del código del spike. Así la lógica del protocolo vive en un solo sitio y la
+batería e2e pre-release valida lo que se publica. `HOLD_SECS=<n>` (con usuario
+SSH) añade una sesión SSH ociosa de `n` segundos para validar keepalive y
+sesiones largas. Detalle en `docs/usage.md` §13.11.
+
