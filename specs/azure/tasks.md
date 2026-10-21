@@ -60,12 +60,15 @@ Fases según research §6.4/§9.6. Cada tarea: dependencias, test y criterio ver
 
 ## F3 — Endurecimiento
 
-- [ ] T-AZ-11 Proxy CONNECT para `/api/tokens` (URLSession con proxy del sistema) y para el WS
+- [x] T-AZ-11 Proxy CONNECT para `/api/tokens` (URLSession con proxy del sistema) y para el WS
       (`ProxyConfig`). Depende de: T-AZ-10. Test: proxy CONNECT local en test. Criterio: A3.2.
       → REQ-AZ-9
-- [ ] T-AZ-12 Sesiones largas y multi‑pestaña: re‑POST encadenado (`token` + `X-Node-Id`),
+- [x] T-AZ-12 Sesiones largas y multi‑pestaña: re‑POST encadenado (`token` + `X-Node-Id`),
       aviso de `connectionLost`. Depende de: T-AZ-10. Test: servidor falso que corta a los N
       segundos. Criterio: A3.1 (E4, E5). → REQ-AZ-5, 7
+      GH-95: renovación (re-POST encadenado con backoff, WS reintentado), ping
+      1006, contrato e2e en `Tests/BastionKitTests/BastionContractTests.swift`.
+      Pendiente: medir en Bastion real una sesión > 1 h (`HOLD_SECS`, R10).
 - [ ] T-AZ-13 `docs/usage.md` §13 Azure (app registration, admin consent, SKU, RBAC, costos,
       límite de RDP con Entra) + checklist e2e pre‑release. Depende de: T-AZ-10. Criterio:
       A3.3. → REQ-AZ-10

@@ -5,7 +5,10 @@ let package = Package(
     name: "IAPDesktopMac",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "App", targets: ["App"])
+        .executable(name: "App", targets: ["App"]),
+        // GH-95: validación contra un Bastion real con el código de producción
+        // (`Spikes/BastionSpike/scripts/validate-f0.sh --usar-bastionkit`).
+        .executable(name: "bastion-check", targets: ["BastionCheck"]),
     ],
     dependencies: [
         .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.6"),
@@ -56,6 +59,7 @@ let package = Package(
         .target(
             name: "BastionKit",
             dependencies: [
+                "AuthKit",  // ProxyResolver compartido (GH-95)
                 "TunnelKit",  // ProxyConfig, TunnelError, filtro loopback de IapListener
                 "SSHKit",
                 "RDPBridge",
@@ -64,6 +68,7 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOSSH", package: "swift-nio-ssh"),
             ]),
+        .executableTarget(name: "BastionCheck", dependencies: ["AuthKit", "AzureClient", "BastionKit"]),
         .target(name: "RDPBridge"),
         .target(name: "SettingsStore"),
         .target(name: "ExplorerUI", dependencies: ["GCPClient"]),

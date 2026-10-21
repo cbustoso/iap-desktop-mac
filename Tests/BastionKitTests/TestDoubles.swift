@@ -84,8 +84,10 @@ func eventually(
 }
 
 /// Fábrica contra el servidor falso (`ws://127.0.0.1`), con el `/api/tokens` en memoria.
+/// Sin renovación (`.none`): estos tests miran el error de un único intento.
 func makeFactory(
-    server: FakeBastionServer, http: StubBastionHTTP, target: BastionTarget = target
+    server: FakeBastionServer, http: StubBastionHTTP, target: BastionTarget = target,
+    retry: BastionRetryPolicy = .none
 ) -> BastionTunnelFactory {
     BastionTunnelFactory(
         target: target,
@@ -93,5 +95,64 @@ func makeFactory(
         sockets: NIOBastionWebSocketTransport(
             connectTimeout: .seconds(5),
             endpointOverride: .init(scheme: "ws", host: "127.0.0.1", port: server.port)),
+        retry: retry,
+        telemetry: .disabled,
+        armToken: { Secrets.armToken })
+}
+
+// MARK: - GH-95: contrato e2e
+
+/// Registra los retardos del backoff sin esperar.
+final class SleepRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Duration] = []
+
+    var delays: [Duration] { lock.withLock { recorded } }
+
+    var sleeper: BastionRetryPolicy.Sleeper {
+        { [self] delay in lock.withLock { recorded.append(delay) } }
+    }
+}
+
+/// Telemetría en memoria.
+final class TelemetryRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [BastionTelemetryEvent] = []
+
+    var events: [BastionTelemetryEvent] { lock.withLock { recorded } }
+
+    var telemetry: BastionTelemetry {
+        BastionTelemetry { [self] _, event in lock.withLock { recorded.append(event) } }
+    }
+}
+
+/// Contador `Sendable` (p. ej. invalidaciones del token ARM).
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
+/// Fábrica contra el servidor falso con `/api/tokens` por el wire (URLSession → HTTP local).
+func makeContractFactory(
+    server: FakeBastionServer,
+    retry: BastionRetryPolicy,
+    telemetry: BastionTelemetry = .disabled,
+    invalidations: Counter = Counter(),
+    pingInterval: Duration? = nil
+) -> BastionTunnelFactory {
+    BastionTunnelFactory(
+        target: target,
+        sessions: BastionSessionClient(
+            transport: URLSessionBastionTransport(session: URLSession(configuration: .ephemeral)),
+            endpointOverride: server.apiBaseURL),
+        sockets: NIOBastionWebSocketTransport(
+            connectTimeout: .seconds(5),
+            endpointOverride: .init(scheme: "ws", host: "127.0.0.1", port: server.port),
+            pingInterval: pingInterval),
+        retry: retry,
+        telemetry: telemetry,
+        invalidateArmToken: { invalidations.increment() },
         armToken: { Secrets.armToken })
 }

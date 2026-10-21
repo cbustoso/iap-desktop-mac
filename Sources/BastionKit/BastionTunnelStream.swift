@@ -16,21 +16,25 @@ public actor BastionTunnelStream: SshByteStream {
     private nonisolated let received: AsyncStream<Data>
     private let link = BastionLinkStates()
     private var reader: Task<Void, Never>?
-    private var onFinish: (@Sendable () async -> Void)?
+    private var onFinish: (@Sendable (BastionTunnelError?) async -> Void)?
     private var closedLocally = false
     private var finished = false
     private var failure: BastionTunnelError?
 
-    private init(socket: any BastionSocket, received: AsyncStream<Data>, onFinish: @escaping @Sendable () async -> Void) {
+    private init(
+        socket: any BastionSocket, received: AsyncStream<Data>,
+        onFinish: @escaping @Sendable (BastionTunnelError?) async -> Void
+    ) {
         self.socket = socket
         self.received = received
         self.onFinish = onFinish
     }
 
     /// Envuelve un WebSocket ya abierto. `onFinish` se llama una sola vez
-    /// cuando el túnel termina (por cualquier lado): libera la sesión Bastion.
+    /// cuando el túnel termina (por cualquier lado), con el motivo si fue
+    /// anómalo: libera la sesión Bastion.
     public static func start(
-        socket: any BastionSocket, onFinish: @escaping @Sendable () async -> Void = {}
+        socket: any BastionSocket, onFinish: @escaping @Sendable (BastionTunnelError?) async -> Void = { _ in }
     ) async -> BastionTunnelStream {
         let (received, continuation) = AsyncStream<Data>.makeStream()
         let stream = BastionTunnelStream(socket: socket, received: received, onFinish: onFinish)
@@ -105,7 +109,7 @@ public actor BastionTunnelStream: SshByteStream {
         link.finish(self.failure)
         let release = onFinish
         onFinish = nil
-        await release?()
+        await release?(self.failure)
     }
 }
 
@@ -147,35 +151,75 @@ final class BastionLinkStates: @unchecked Sendable {
 
 /// Abre túneles hacia un mismo destino compartiendo la sesión Bastion
 /// (encadenado + un único `DELETE`, ver `BastionSessionPool`).
+///
+/// GH-95: si el upgrade del WebSocket falla con un error reintentable (p. ej.
+/// `websocketToken` ya caducado → 401/403, corte de red), se renueva la
+/// sesión con otro `POST` encadenado y se reintenta el WebSocket con backoff.
+/// Un túnel ya establecido **no** se reanuda: el protocolo no tiene SID/ACK
+/// (research §3.3 (3)), así que si el WebSocket cae el stream termina con
+/// `.connectionLost` y la siguiente conexión pide una sesión encadenada nueva.
 public struct BastionTunnelFactory: Sendable {
     public let target: BastionTarget
     private let pool: BastionSessionPool
     private let sockets: any BastionSocketOpening
+    private let retry: BastionRetryPolicy
+    private let telemetry: BastionTelemetry
 
     public init(
         target: BastionTarget,
         sessions: BastionSessionClient = BastionSessionClient(),
         sockets: any BastionSocketOpening = NIOBastionWebSocketTransport(),
+        retry: BastionRetryPolicy = .default,
+        telemetry: BastionTelemetry = .oslog,
+        invalidateArmToken: @escaping BastionSessionPool.ArmTokenInvalidator = {},
         armToken: @escaping BastionSessionPool.ArmTokenProvider
     ) {
         self.target = target
-        self.pool = BastionSessionPool(target: target, client: sessions, armToken: armToken)
+        self.pool = BastionSessionPool(
+            target: target, client: sessions, retry: retry, telemetry: telemetry,
+            invalidateArmToken: invalidateArmToken, armToken: armToken)
         self.sockets = sockets
+        self.retry = retry
+        self.telemetry = telemetry
     }
 
-    /// `POST /api/tokens` (encadenado) + WebSocket. Si el WebSocket falla, la
-    /// sesión se libera (y se borra si era la última).
+    /// `POST /api/tokens` (encadenado) + WebSocket, con renovación. Si al final
+    /// no hay WebSocket, la sesión se libera (y se borra si era la última).
     public func openStream() async throws -> BastionTunnelStream {
-        let session = try await pool.acquire()
-        let socket: any BastionSocket
-        do {
-            socket = try await sockets.open(.tunnel(dnsName: target.dnsName, session: session))
-        } catch {
-            await pool.release()
-            throw error
+        var attempt = 1
+        while true {
+            let session = try await pool.acquire()
+            let socket: any BastionSocket
+            do {
+                socket = try await sockets.open(.tunnel(dnsName: target.dnsName, session: session))
+            } catch {
+                let failure = BastionTunnelError(error)
+                telemetry.record(target, .webSocketFailed(attempt: attempt, error: failure))
+                guard attempt < retry.maxAttempts, failure.isRetryable, !Task.isCancelled else {
+                    await pool.release()
+                    throw attempt > 1 ? BastionTunnelError.retriesExhausted(attempts: attempt, last: failure) : failure
+                }
+                // Sin DELETE: el siguiente POST encadena esta sesión.
+                await pool.abandon()
+                let delay = retry.delay(after: attempt)
+                telemetry.record(target, .retryScheduled(attempt: attempt, delay: delay, reason: failure))
+                do {
+                    try await retry.sleep(delay)
+                } catch {
+                    await pool.deleteIfUnused()
+                    throw error
+                }
+                attempt += 1
+                continue
+            }
+            telemetry.record(target, .webSocketOpened(attempt: attempt))
+            let pool = self.pool
+            let (target, telemetry) = (self.target, self.telemetry)
+            return await BastionTunnelStream.start(socket: socket) { failure in
+                if let failure { telemetry.record(target, .tunnelLost(failure)) }
+                await pool.release()
+            }
         }
-        let pool = self.pool
-        return await BastionTunnelStream.start(socket: socket) { await pool.release() }
     }
 
     /// Conexiones con sesión activa (diagnóstico y tests).

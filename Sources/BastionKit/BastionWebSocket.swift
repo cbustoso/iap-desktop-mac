@@ -2,6 +2,7 @@ import Foundation
 import NIOCore
 import NIOHTTP1
 import NIOPosix
+import NIOSSL
 import NIOWebSocket
 import TunnelKit
 import WebSocketKit
@@ -73,22 +74,33 @@ public struct NIOBastionWebSocketTransport: BastionSocketOpening {
         }
     }
 
+    /// GH-95: proxy HTTP para el `CONNECT {dnsName}:443` (REQ-AZ-9). Ver
+    /// `BastionNetworkConfiguration.resolve` para tomarlo del sistema.
     public var proxy: ProxyConfig?
     public var connectTimeout: Duration
     /// RDP manda ráfagas grandes: el límite por defecto (16 KiB) cerraría el WS.
     public var maxFrameSize: Int
     public var endpointOverride: Endpoint?
+    /// GH-95: ping WebSocket periódico; sin pong antes del siguiente ping, el
+    /// WebSocket se da por muerto (Close 1006 → `.connectionLost(1006)`), así
+    /// un corte a medias (NAT, Wi‑Fi, suspensión) no deja la conexión colgada
+    /// en silencio. `nil` lo desactiva.
+    public var pingInterval: Duration?
+    /// Solo tests: TLS que confía en la CA del servidor falso.
+    var tlsConfiguration: TLSConfiguration?
 
     public init(
         proxy: ProxyConfig? = nil,
         connectTimeout: Duration = .seconds(30),
         maxFrameSize: Int = 1 << 24,
-        endpointOverride: Endpoint? = nil
+        endpointOverride: Endpoint? = nil,
+        pingInterval: Duration? = .seconds(30)
     ) {
         self.proxy = proxy
         self.connectTimeout = connectTimeout
         self.maxFrameSize = maxFrameSize
         self.endpointOverride = endpointOverride
+        self.pingInterval = pingInterval
     }
 
     public func open(_ request: BastionWebSocketRequest) async throws -> any BastionSocket {
@@ -97,7 +109,13 @@ public struct NIOBastionWebSocketTransport: BastionSocketOpening {
         let host = endpointOverride?.host ?? request.host
         let port = endpointOverride?.port ?? 443
         let proxy = self.proxy
-        let configuration = WebSocketClient.Configuration(maxFrameSize: maxFrameSize)
+        if let proxy, scheme == "wss" {
+            // WebSocketKit cierra el canal sin fallar `connect` si el proxy
+            // rechaza el CONNECT (se vería como timeout): se sondea antes.
+            try await BastionProxyProbe.check(proxy, host: host, port: port, timeout: connectTimeout)
+        }
+        let configuration = WebSocketClient.Configuration(tlsConfiguration: tlsConfiguration, maxFrameSize: maxFrameSize)
+        let ping = pingInterval.map { TimeAmount.nanoseconds($0.nanoseconds) }
         let group = MultiThreadedEventLoopGroup.singleton
         let (stream, continuation) = AsyncStream<BastionInboundMessage>.makeStream()
         let closeCode = LockedBox<Int?>(nil)
@@ -133,7 +151,12 @@ public struct NIOBastionWebSocketTransport: BastionSocketOpening {
                         continuation.finish()
                     }
                     timeout.cancel()
-                    if once.claim() { resume.resume(returning: ws) } else { _ = ws.close() }
+                    if once.claim() {
+                        ws.pingInterval = ping
+                        resume.resume(returning: ws)
+                    } else {
+                        _ = ws.close()
+                    }
                 }.whenFailure { error in
                     timeout.cancel()
                     if once.claim() { resume.resume(throwing: Self.mapHandshakeError(error, viaProxy: proxy != nil)) }
@@ -190,6 +213,86 @@ final class NIOBastionSocket: BastionSocket {
         guard !socket.isClosed else { return }
         // Explícito: WebSocketKit usa `goingAway` (1001) por defecto.
         try? await socket.close(code: .normalClosure).get()
+    }
+}
+
+// MARK: - Sondeo del proxy
+
+/// GH-95: `CONNECT host:port` de prueba contra el proxy para convertir un
+/// rechazo (403, 407, cierre) en `.proxyBlocked` inmediato. Un éxito se
+/// recuerda `ttl` por proxy y destino: no se repite en cada túnel.
+enum BastionProxyProbe {
+    static let ttl: Duration = .seconds(60)
+    private static let recent = LockedBox<[String: ContinuousClock.Instant]>([:])
+
+    static func check(_ proxy: ProxyConfig, host: String, port: Int, timeout: Duration) async throws {
+        let key = "\(proxy.host):\(proxy.port)>\(host):\(port)"
+        let now = ContinuousClock.now
+        if let last = recent.value[key], now - last < ttl { return }
+        let status: Int?
+        do {
+            status = try await connectStatus(proxy, host: host, port: port, timeout: timeout)
+        } catch {
+            throw BastionTunnelError.proxyBlocked
+        }
+        guard let status, (200...299).contains(status) else { throw BastionTunnelError.proxyBlocked }
+        recent.withValue { $0[key] = now }
+    }
+
+    /// Status de la respuesta al `CONNECT`; `nil` si el proxy cierra sin contestar.
+    private static func connectStatus(_ proxy: ProxyConfig, host: String, port: Int, timeout: Duration) async throws -> Int? {
+        let group = MultiThreadedEventLoopGroup.singleton
+        let promise = group.next().makePromise(of: Int?.self)
+        let channel = try await ClientBootstrap(group: group)
+            .connectTimeout(.nanoseconds(timeout.nanoseconds))
+            .channelInitializer { channel in
+                channel.eventLoop.makeCompletedFuture {
+                    try channel.pipeline.syncOperations.addHandler(StatusLineHandler(promise: promise))
+                }
+            }
+            .connect(host: proxy.host, port: proxy.port)
+            .get()
+        let deadline = channel.eventLoop.scheduleTask(in: .nanoseconds(timeout.nanoseconds)) {
+            promise.fail(BastionTunnelError.timeout)
+        }
+        let request = "CONNECT \(host):\(port) HTTP/1.1\r\nHost: \(host):\(port)\r\n\r\n"
+        channel.writeAndFlush(channel.allocator.buffer(string: request), promise: nil)
+        defer {
+            deadline.cancel()
+            channel.close(promise: nil)
+        }
+        return try await promise.futureResult.get()
+    }
+
+    /// Lee hasta la primera línea (`HTTP/1.1 200 …`) y resuelve con su status.
+    private final class StatusLineHandler: ChannelInboundHandler {
+        typealias InboundIn = ByteBuffer
+
+        private let promise: EventLoopPromise<Int?>
+        private var buffer = ByteBuffer()
+        private var done = false
+
+        init(promise: EventLoopPromise<Int?>) { self.promise = promise }
+
+        func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+            var chunk = unwrapInboundIn(data)
+            buffer.writeBuffer(&chunk)
+            let text = String(buffer: buffer)
+            guard !done, let end = text.range(of: "\r\n") else { return }
+            done = true
+            let parts = text[..<end.lowerBound].split(separator: " ")
+            promise.succeed(parts.count > 1 ? Int(parts[1]) : nil)
+        }
+
+        func channelInactive(context: ChannelHandlerContext) {
+            if !done { done = true; promise.succeed(nil) }
+            context.fireChannelInactive()
+        }
+
+        func errorCaught(context: ChannelHandlerContext, error: any Error) {
+            if !done { done = true; promise.fail(error) }
+            context.close(promise: nil)
+        }
     }
 }
 

@@ -142,6 +142,28 @@ struct BastionLocalForwarderTests {
         await forwarder.stop()
     }
 
+    /// GH-95: si el WebSocket cae a mitad de sesión, el TCP local muere enseguida
+    /// (sin hang) y la UI recibe el error tipado.
+    @Test func droppedWebSocketKillsTheTcpClientAndPublishesTheTypedError() async throws {
+        let server = try await FakeBastionServer.start(.dropAfter(.milliseconds(300)))
+        defer { Task { await server.shutdown() } }
+        let http = StubBastionHTTP()
+        let forwarder = try await BastionLocalForwarder.start(factory: makeFactory(server: server, http: http))
+        var failures = forwarder.failures().makeAsyncIterator()
+
+        let client = try await LocalClient(port: forwarder.port)
+        try await client.send(Data("hola".utf8))
+        #expect(await client.receive(count: 4) == Data("hola".utf8))
+        // Tras el corte, el cliente ve EOF/reset en vez de quedarse esperando.
+        #expect(await client.receive(count: 1).isEmpty)
+        #expect(await failures.next() == .connectionLost(code: nil))
+        #expect(forwarder.statistics.lastError == .connectionLost(code: nil))
+        #expect(await eventually { http.deleteRequests.count == 1 })
+
+        client.close()
+        await forwarder.stop()
+    }
+
     @Test func onlyLoopbackClientsAreAllowed() {
         let loopback = NWEndpoint.hostPort(host: .ipv4(.loopback), port: 50_000)
         let lan = NWEndpoint.hostPort(host: "192.168.1.20", port: 50_000)
